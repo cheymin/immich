@@ -24,6 +24,7 @@ import { DB } from 'src/schema';
 import { immich_uuid_v7 } from 'src/schema/functions';
 import { ExtensionVersion, VectorExtension } from 'src/types';
 import { vectorIndexQuery } from 'src/utils/database';
+import { initSqliteSchema } from 'src/utils/sqlite-schema';
 import z from 'zod';
 
 export let cachedVectorExtension: VectorExtension | undefined;
@@ -66,6 +67,17 @@ export class DatabaseRepository {
 
   async shutdown() {
     await this.db.destroy();
+  }
+
+  /**
+   * Lightweight SQLite build: create the full schema from the code-defined
+   * table decorators (via @immich/sql-tools) using SQLite-compatible DDL.
+   * Replaces the Postgres-only Kysely migration flow for the single-container
+   * build. Idempotent — safe to run on every boot.
+   */
+  async initSqliteSchema(): Promise<void> {
+    const statements = await initSqliteSchema(this.db);
+    this.logger.log(`SQLite schema initialised: ${statements.length} statements executed`);
   }
 
   getVectorExtension(): Promise<VectorExtension> {

@@ -57,10 +57,11 @@ export class DatabaseService extends BaseService {
   async onBootstrap() {
     // Lightweight SQLite build: skip all Postgres version checks, vector
     // extension setup (pgvector/vectorchord), PG-specific schema drift
-    // detection, and PG-only Kysely migrations. The schema is created lazily
-    // via SQLite-compatible DDL in DatabaseBootstrap.init() instead.
+    // detection, and PG-only Kysely migrations. The schema is created from the
+    // code-defined table decorators using SQLite-compatible DDL instead.
     if (process.env.DB_PATH || process.env.IMMICH_DB_DRIVER === 'sqlite') {
-      this.logger.log('SQLite build detected — skipping Postgres/vector bootstrap and migrations');
+      this.logger.log('SQLite build detected — initialising schema from code definitions');
+      await this.databaseRepository.initSqliteSchema();
       return;
     }
 
