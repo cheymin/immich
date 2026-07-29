@@ -1,4 +1,4 @@
-import { createPostgres, DatabaseConnectionParams } from '@immich/sql-tools';
+import { DatabaseConnectionParams } from '@immich/sql-tools';
 import {
   AliasedRawBuilder,
   DeduplicateJoinsPlugin,
@@ -14,10 +14,13 @@ import {
   ShallowDehydrateObject,
   sql,
   SqlBool,
+  SqliteDialect,
 } from 'kysely';
-import { PostgresJSDialect } from 'kysely-postgres-js';
 import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
-import { Notice, PostgresError } from 'postgres';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { PostgresError } from 'postgres';
+import Database from 'better-sqlite3';
 import { columns, lockableProperties, LockableProperty, Person } from 'src/database';
 import { DummyValue, GenerateSqlQueries } from 'src/decorators';
 import { AssetEditActionItem } from 'src/dtos/editing.dto';
@@ -44,18 +47,21 @@ import { AssetExifTable } from 'src/schema/tables/asset-exif.table';
 import { AudioStreamInfo, VectorExtension, VideoFormat, VideoPacketInfo, VideoStreamInfo } from 'src/types';
 import { fromChecksum } from 'src/utils/request';
 
-export const getKyselyConfig = (connection: DatabaseConnectionParams): KyselyConfig => {
+export const getKyselyConfig = (_connection: DatabaseConnectionParams): KyselyConfig => {
+  // Lightweight build: use a local SQLite database file instead of Postgres.
+  // The connection parameter is kept for signature compatibility but ignored;
+  // the file path is taken from DB_PATH (default /data/immich.db).
+  const dbPath = process.env.DB_PATH || '/data/immich.db';
+  const dir = dirname(dbPath);
+  if (dir) {
+    mkdirSync(dir, { recursive: true });
+  }
+  const database = new Database(dbPath);
+  database.pragma('journal_mode = WAL');
+  database.pragma('busy_timeout = 5000');
+  database.pragma('foreign_keys = ON');
   return {
-    dialect: new PostgresJSDialect({
-      postgres: createPostgres({
-        connection,
-        onNotice: (notice: Notice) => {
-          if (notice['severity'] !== 'NOTICE') {
-            console.warn('Postgres notice:', notice);
-          }
-        },
-      }),
-    }),
+    dialect: new SqliteDialect({ database }),
     log(event) {
       if (event.level !== 'error') {
         return;

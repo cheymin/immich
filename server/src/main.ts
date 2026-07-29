@@ -1,11 +1,10 @@
-import { Kysely, sql } from 'kysely';
+import { Kysely } from 'kysely';
 import { CommandFactory } from 'nest-commander';
 import { ChildProcess, fork } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
-import { PostgresError } from 'postgres';
 import { ImmichAdminModule } from 'src/app.module';
-import { DatabaseLock, ExitCode, ImmichWorker, LogLevel, SystemMetadataKey } from 'src/enum';
+import { ExitCode, ImmichWorker, LogLevel, SystemMetadataKey } from 'src/enum';
 import { ConfigRepository } from 'src/repositories/config.repository';
 import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository';
 import { type DB } from 'src/schema';
@@ -52,42 +51,17 @@ class Workers {
     try {
       const value = await systemMetadataRepository.get(SystemMetadataKey.MaintenanceMode);
       return value?.isMaintenanceMode || false;
-    } catch (error: Error | any) {
-      // Table doesn't exist (migrations haven't run yet)
-      if ((error as PostgresError).code === '42P01') {
-        return false;
-      }
-
-      throw error;
+    } catch {
+      // Table doesn't exist yet (fresh SQLite database, migrations not run).
+      return false;
     } finally {
       await kysely.destroy();
     }
   }
 
   private async waitForFreeLock() {
-    const { database } = new ConfigRepository().getEnv();
-    const kysely = new Kysely<DB>(getKyselyConfig(database.config));
-
-    let isLocked = false;
-    while (!isLocked) {
-      isLocked = await kysely.connection().execute(async (conn) => {
-        const { rows } = await sql<{
-          pg_try_advisory_lock: boolean;
-        }>`SELECT pg_try_advisory_lock(${DatabaseLock.MaintenanceOperation})`.execute(conn);
-
-        const isLocked = rows[0].pg_try_advisory_lock;
-
-        if (isLocked) {
-          await sql`SELECT pg_advisory_unlock(${DatabaseLock.MaintenanceOperation})`.execute(conn);
-        }
-
-        return isLocked;
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-
-    await kysely.destroy();
+    // No-op: single-container build runs on SQLite and has no Postgres advisory
+    // locks. Maintenance operations are serialized by the single process.
   }
 
   /**

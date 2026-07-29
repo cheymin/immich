@@ -8,8 +8,6 @@ import { AuthAdminController } from 'src/controllers/auth-admin.controller';
 import { AuthController } from 'src/controllers/auth.controller';
 import { DatabaseBackupController } from 'src/controllers/database-backup.controller';
 import { DownloadController } from 'src/controllers/download.controller';
-import { DuplicateController } from 'src/controllers/duplicate.controller';
-import { FaceController } from 'src/controllers/face.controller';
 import { IntegrityAdminController } from 'src/controllers/integrity-admin.controller';
 import { JobController } from 'src/controllers/job.controller';
 import { LibraryController } from 'src/controllers/library.controller';
@@ -18,10 +16,7 @@ import { MapController } from 'src/controllers/map.controller';
 import { MemoryController } from 'src/controllers/memory.controller';
 import { NotificationAdminController } from 'src/controllers/notification-admin.controller';
 import { NotificationController } from 'src/controllers/notification.controller';
-import { OAuthController } from 'src/controllers/oauth.controller';
 import { PartnerController } from 'src/controllers/partner.controller';
-import { PersonController } from 'src/controllers/person.controller';
-import { PluginController } from 'src/controllers/plugin.controller';
 import { QueueController } from 'src/controllers/queue.controller';
 import { SearchController } from 'src/controllers/search.controller';
 import { ServerController } from 'src/controllers/server.controller';
@@ -36,9 +31,12 @@ import { TimelineController } from 'src/controllers/timeline.controller';
 import { TrashController } from 'src/controllers/trash.controller';
 import { UserAdminController } from 'src/controllers/user-admin.controller';
 import { UserController } from 'src/controllers/user.controller';
-import { VideoStreamController } from 'src/controllers/video-stream.controller';
 import { ViewController } from 'src/controllers/view.controller';
-import { WorkflowController } from 'src/controllers/workflow.controller';
+
+// Removed in the lightweight single-container build:
+//   DuplicateController, FaceController, OAuthController, PersonController,
+//   PluginController, VideoStreamController, WorkflowController
+// (face recognition, CLIP duplicate detection, OAuth/SSO, plugins, HLS transcoding)
 
 export const controllers = [
   ApiKeyController,
@@ -51,8 +49,6 @@ export const controllers = [
   AuthAdminController,
   DatabaseBackupController,
   DownloadController,
-  DuplicateController,
-  FaceController,
   IntegrityAdminController,
   JobController,
   LibraryController,
@@ -61,10 +57,7 @@ export const controllers = [
   MemoryController,
   NotificationController,
   NotificationAdminController,
-  OAuthController,
   PartnerController,
-  PersonController,
-  PluginController,
   QueueController,
   SearchController,
   ServerController,
@@ -79,7 +72,5 @@ export const controllers = [
   TrashController,
   UserAdminController,
   UserController,
-  VideoStreamController,
   ViewController,
-  WorkflowController,
 ];

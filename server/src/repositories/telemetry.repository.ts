@@ -56,42 +56,11 @@ const aggregationBoundaries = [
 
 let instance: NodeSDK | undefined;
 
-export const bootstrapTelemetry = (port: number) => {
-  if (instance) {
-    throw new Error('OpenTelemetry SDK already started');
-  }
-
-  const { telemetry } = new ConfigRepository().getEnv();
-
-  instance = new NodeSDK({
-    resource: resourceFromAttributes({
-      [ATTR_SERVICE_NAME]: `immich`,
-      [ATTR_SERVICE_VERSION]: serverVersion.toString(),
-    }),
-    metricReader: new PrometheusExporter({ port }),
-    contextManager: new AsyncLocalStorageContextManager(),
-    instrumentations: [
-      new HttpInstrumentation({
-        enabled: telemetry.metrics.has(ImmichTelemetry.Api),
-        ignoreIncomingRequestHook: (request) => excludePaths.some((item) => request.url?.startsWith(item)),
-      }),
-      new IORedisInstrumentation(),
-      new NestInstrumentation(),
-      new PgInstrumentation(),
-    ],
-    views: [
-      {
-        instrumentName: '*',
-        instrumentUnit: 'ms',
-        aggregation: {
-          type: AggregationType.EXPLICIT_BUCKET_HISTOGRAM,
-          options: { boundaries: aggregationBoundaries },
-        },
-      },
-    ],
-  });
-
-  instance.start();
+export const bootstrapTelemetry = (_port: number) => {
+  // OpenTelemetry exporters / instrumentation are disabled in the lightweight
+  // single-container build. Kept as a no-op so call sites (e.g. the microservices
+  // worker) still compile and run without starting a Prometheus exporter.
+  void _port;
 };
 
 export const teardownTelemetry = async () => {

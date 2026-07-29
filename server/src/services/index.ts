@@ -10,8 +10,6 @@ import { CliService } from 'src/services/cli.service';
 import { DatabaseBackupService } from 'src/services/database-backup.service';
 import { DatabaseService } from 'src/services/database.service';
 import { DownloadService } from 'src/services/download.service';
-import { DuplicateService } from 'src/services/duplicate.service';
-import { HlsService } from 'src/services/hls.service';
 import { IntegrityService } from 'src/services/integrity.service';
 import { JobService } from 'src/services/job.service';
 import { LibraryService } from 'src/services/library.service';
@@ -22,16 +20,12 @@ import { MemoryService } from 'src/services/memory.service';
 import { MetadataService } from 'src/services/metadata.service';
 import { NotificationAdminService } from 'src/services/notification-admin.service';
 import { NotificationService } from 'src/services/notification.service';
-import { OcrService } from 'src/services/ocr.service';
 import { PartnerService } from 'src/services/partner.service';
-import { PersonService } from 'src/services/person.service';
-import { PluginService } from 'src/services/plugin.service';
 import { QueueService } from 'src/services/queue.service';
 import { SearchService } from 'src/services/search.service';
 import { ServerService } from 'src/services/server.service';
 import { SessionService } from 'src/services/session.service';
 import { SharedLinkService } from 'src/services/shared-link.service';
-import { SmartInfoService } from 'src/services/smart-info.service';
 import { StackService } from 'src/services/stack.service';
 import { StorageTemplateService } from 'src/services/storage-template.service';
 import { StorageService } from 'src/services/storage.service';
@@ -39,16 +33,20 @@ import { SyncService } from 'src/services/sync.service';
 import { SystemConfigService } from 'src/services/system-config.service';
 import { SystemMetadataService } from 'src/services/system-metadata.service';
 import { TagService } from 'src/services/tag.service';
-import { TelemetryService } from 'src/services/telemetry.service';
 import { TimelineService } from 'src/services/timeline.service';
-import { TranscodingService } from 'src/services/transcoding.service';
 import { TrashService } from 'src/services/trash.service';
 import { UserAdminService } from 'src/services/user-admin.service';
 import { UserService } from 'src/services/user.service';
 import { VersionService } from 'src/services/version.service';
 import { ViewService } from 'src/services/view.service';
-import { WorkflowExecutionService } from 'src/services/workflow-execution.service';
-import { WorkflowService } from 'src/services/workflow.service';
+
+// Removed in the lightweight single-container build:
+//   DuplicateService, HlsService, OcrService, PersonService, PluginService,
+//   SmartInfoService, TelemetryService, TranscodingService,
+//   WorkflowExecutionService, WorkflowService
+// (face recognition, CLIP semantic search, ML OCR, image classification,
+//  HLS video transcoding, plugins, OpenTelemetry). OCR is handled by
+//  Tesseract at the system level instead of the Python ML service.
 
 export const services = [
   ApiKeyService,
@@ -63,9 +61,7 @@ export const services = [
   DatabaseBackupService,
   DatabaseService,
   DownloadService,
-  DuplicateService,
   IntegrityService,
-  HlsService,
   JobService,
   LibraryService,
   MaintenanceService,
@@ -75,16 +71,12 @@ export const services = [
   MetadataService,
   NotificationService,
   NotificationAdminService,
-  OcrService,
   PartnerService,
-  PersonService,
-  PluginService,
   QueueService,
   SearchService,
   ServerService,
   SessionService,
   SharedLinkService,
-  SmartInfoService,
   StackService,
   StorageService,
   StorageTemplateService,
@@ -92,14 +84,10 @@ export const services = [
   SystemConfigService,
   SystemMetadataService,
   TagService,
-  TelemetryService,
   TimelineService,
-  TranscodingService,
   TrashService,
   UserAdminService,
   UserService,
   VersionService,
   ViewService,
-  WorkflowExecutionService,
-  WorkflowService,
 ];

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { spawn } from 'node:child_process';
 import { Duration } from 'luxon';
 import { readFile } from 'node:fs/promises';
 import { MachineLearningConfig } from 'src/config';
@@ -218,15 +219,85 @@ export class MachineLearningRepository {
     return response[ModelTask.SEARCH];
   }
 
-  async ocr(imagePath: string, { modelName, minDetectionScore, minRecognitionScore, maxResolution }: OcrOptions) {
-    const request = {
-      [ModelTask.OCR]: {
-        [ModelType.DETECTION]: { modelName, options: { minScore: minDetectionScore, maxResolution } },
-        [ModelType.RECOGNITION]: { modelName, options: { minScore: minRecognitionScore } },
-      },
-    };
-    const response = await this.predict<OcrResponse>({ imagePath }, request);
-    return response[ModelTask.OCR];
+  async ocr(imagePath: string, { minDetectionScore, minRecognitionScore, maxResolution }: OcrOptions) {
+    // Lightweight single-container build: run OCR locally via the system
+    // `tesseract` binary instead of calling out to a remote machine-learning
+    // server. This keeps the OCR feature available without the heavy ML
+    // container, at the cost of word-level (not line-level) boxing.
+    const lang = process.env.TESSERACT_LANG || 'eng';
+    const tesseractPath = process.env.TESSERACT_PATH || 'tesseract';
+    void minDetectionScore;
+    void minRecognitionScore;
+    void maxResolution;
+
+    const tsv = await this.runTesseract(tesseractPath, imagePath, lang);
+    const words = this.parseTesseractTsv(tsv);
+
+    const text: string[] = [];
+    const box: number[] = [];
+    const boxScore: number[] = [];
+    const textScore: number[] = [];
+
+    for (const w of words) {
+      if (!w.text) {
+        continue;
+      }
+      text.push(w.text);
+      // Tesseract gives left/top/width/height -> emit 4-point box (x1,y1,x2,y2,x3,y3,x4,y4)
+      const { left, top, width, height } = w;
+      box.push(left, top, left + width, top, left + width, top + height, left, top + height);
+      boxScore.push(w.conf / 100);
+      textScore.push(w.conf / 100);
+    }
+
+    return { text, box, boxScore, textScore };
+  }
+
+  private runTesseract(binary: string, imagePath: string, lang: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(binary, [imagePath, '-', '-l', lang, 'tsv'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', (chunk) => (stdout += chunk.toString()));
+      proc.stderr.on('data', (chunk) => (stderr += chunk.toString()));
+      proc.on('error', (error) => reject(new Error(`Failed to spawn tesseract: ${error.message}`)));
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          reject(new Error(`tesseract exited with code ${code}: ${stderr.trim()}`));
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+  }
+
+  private parseTesseractTsv(tsv: string): Array<{ left: number; top: number; width: number; height: number; conf: number; text: string }> {
+    const lines = tsv.split(/\r?\n/);
+    const result: Array<{ left: number; top: number; width: number; height: number; conf: number; text: string }> = [];
+    // First line is the header: level page_num block_num par_num line_num word_num left top width height conf text
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line) {
+        continue;
+      }
+      const cols = line.split('\t');
+      if (cols.length < 12) {
+        continue;
+      }
+      const level = Number(cols[0]);
+      // Only emit word-level rows (level 5) for fine-grained boxes.
+      if (level !== 5) {
+        continue;
+      }
+      const left = Number(cols[6]);
+      const top = Number(cols[7]);
+      const width = Number(cols[8]);
+      const height = Number(cols[9]);
+      const conf = Number(cols[10]);
+      const text = cols[11] ?? '';
+      result.push({ left, top, width, height, conf, text });
+    }
+    return result;
   }
 
   private async getFormData(payload: ModelPayload, config: MachineLearningRequest): Promise<FormData> {

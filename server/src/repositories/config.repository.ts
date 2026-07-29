@@ -258,7 +258,7 @@ const getEnv = (): EnvData => {
 
   return {
     host: dto.IMMICH_HOST,
-    port: dto.IMMICH_PORT || 2283,
+    port: dto.IMMICH_PORT || 7860,
     environment,
     configFile: dto.IMMICH_CONFIG_FILE,
     logLevel: dto.IMMICH_LOG_LEVEL,

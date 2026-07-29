@@ -10,15 +10,12 @@ import { MaintenanceWorkerService } from 'src/maintenance/maintenance-worker.ser
 import { WebSocketAdapter } from 'src/middleware/websocket.adapter';
 import { ConfigRepository } from 'src/repositories/config.repository';
 import { LoggingRepository } from 'src/repositories/logging.repository';
-import { bootstrapTelemetry } from 'src/repositories/telemetry.repository';
 import { ApiService } from 'src/services/api.service';
 import { useSwagger } from 'src/utils/misc';
 
 export function configureTelemetry() {
-  const { telemetry } = new ConfigRepository().getEnv();
-  if (telemetry.metrics.size > 0) {
-    bootstrapTelemetry(telemetry.apiPort);
-  }
+  // OpenTelemetry / Prometheus metrics have been removed for the lightweight
+  // single-container build. Kept as a no-op so existing call sites still compile.
 }
 
 export async function configureExpress(

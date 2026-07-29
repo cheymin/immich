@@ -1,16 +1,13 @@
-import { getQueueToken } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
 import { ModuleRef, Reflector } from '@nestjs/core';
-import { JobsOptions, Queue, Worker } from 'bullmq';
-import { setTimeout } from 'node:timers/promises';
 import { JobConfig } from 'src/decorators';
 import { QueueJobResponseDto, QueueJobSearchDto } from 'src/dtos/queue.dto';
-import { ImmichWorker, JobName, JobStatus, MetadataKey, QueueCleanType, QueueJobStatus, QueueName } from 'src/enum';
+import { JobName, JobStatus, MetadataKey, QueueCleanType, QueueName } from 'src/enum';
 import { ConfigRepository } from 'src/repositories/config.repository';
 import { EventRepository } from 'src/repositories/event.repository';
 import { LoggingRepository } from 'src/repositories/logging.repository';
 import { JobCounts, JobItem, JobOf } from 'src/types';
-import { getKeyByValue, getMethodNames, ImmichStartupError } from 'src/utils/misc';
+import { getMethodNames } from 'src/utils/misc';
 
 type JobMapItem = {
   jobName: JobName;
@@ -19,14 +16,23 @@ type JobMapItem = {
   label: string;
 };
 
-const WORKER_WATCH_INTERVAL_MS = 30_000;
-
+/**
+ * In-process job queue (no Redis / BullMQ).
+ *
+ * The original implementation backed every queue with BullMQ + Redis so the API
+ * and microservices workers could share a job store. In the single-container
+ * lightweight build there is only one process, so jobs are dispatched directly
+ * in-memory via setImmediate. Public method signatures are preserved so the
+ * rest of the codebase (BaseService, JobController, etc.) compiles unchanged.
+ *
+ * Trade-off: jobs are not persisted across restarts and concurrency control is
+ * best-effort. Acceptable for a personal, single-container deployment.
+ */
 @Injectable()
 export class JobRepository {
-  private workers: Partial<Record<QueueName, Worker>> = {};
   private handlers: Partial<Record<JobName, JobMapItem>> = {};
-  private workerWatcher?: ReturnType<typeof setInterval>;
-  private microservicesPresent = true;
+  private paused = new Set<QueueName>();
+  private inflight = 0;
 
   constructor(
     private moduleRef: ModuleRef,
@@ -53,16 +59,6 @@ export class JobRepository {
         const { name: jobName, queue: queueName } = config;
         const label = `${Service.name}.${handler.name}`;
 
-        // one handler per job
-        if (Object.hasOwn(this.handlers, jobName)) {
-          const jobKey = getKeyByValue(JobName, jobName);
-          const errorMessage = `Failed to add job handler for ${label}`;
-          this.logger.error(
-            `${errorMessage}. JobName.${jobKey} is already handled by ${this.handlers[jobName]!.label}.`,
-          );
-          throw new ImmichStartupError(errorMessage);
-        }
-
         this.handlers[jobName] = {
           label,
           jobName,
@@ -74,125 +70,73 @@ export class JobRepository {
       }
     }
 
-    // no missing handlers
+    // Missing handlers are expected in the lightweight build: face-detection,
+    // CLIP, transcoding, OCR and duplicate-detection services have been removed,
+    // so their jobs simply won't run. Warn instead of throwing.
     for (const [jobKey, jobName] of Object.entries(JobName)) {
-      const item = this.handlers[jobName];
-      if (!item) {
-        const errorMessage = `Failed to find job handler for Job.${jobKey} ("${jobName}")`;
-        this.logger.error(
-          `${errorMessage}. Make sure to add the @OnJob({ name: JobName.${jobKey}, queue: QueueName.XYZ }) decorator for the new job.`,
-        );
-        throw new ImmichStartupError(errorMessage);
+      if (!this.handlers[jobName]) {
+        this.logger.warn(`No job handler for Job.${jobKey} ("${jobName}") — it will be skipped.`);
       }
     }
   }
 
   startWorkers() {
-    const { bull } = this.configRepository.getEnv();
-    for (const queueName of Object.values(QueueName)) {
-      this.logger.debug(`Starting worker for queue: ${queueName}`);
-      this.workers[queueName] = new Worker(
-        queueName,
-        (job) => this.eventRepository.emit('JobRun', queueName, job as JobItem),
-        { ...bull.config, concurrency: 1, name: ImmichWorker.Microservices },
-      );
-    }
+    this.logger.log('In-process job queue ready (no separate workers).');
   }
 
   watchWorkers() {
-    this.workerWatcher ??= setInterval(() => void this.checkWorkers(), WORKER_WATCH_INTERVAL_MS);
+    // no-op: single process, nothing to watch
   }
 
   teardown() {
-    if (!this.workerWatcher) {
-      return;
-    }
-
-    clearInterval(this.workerWatcher);
-    this.workerWatcher = undefined;
-  }
-
-  private async checkWorkers() {
-    let isPresent: boolean;
-    try {
-      const suffix = `:w:${ImmichWorker.Microservices}`;
-      const workers = await this.getQueue(QueueName.BackgroundTask).getWorkers();
-      isPresent = workers.some((worker) => worker.rawname?.endsWith(suffix));
-    } catch {
-      return;
-    }
-
-    if (this.microservicesPresent !== isPresent) {
-      if (isPresent) {
-        this.logger.log('Microservices worker connected.');
-      } else {
-        this.logger.warn(
-          'No microservices worker is connected. Background jobs will not be processed until one is running.',
-        );
-      }
-    }
-    this.microservicesPresent = isPresent;
+    // no-op
   }
 
   async run({ name, data }: JobItem) {
     const item = this.handlers[name as JobName];
     if (!item) {
-      this.logger.warn(`Skipping unknown job: "${name}"`);
+      this.logger.verbose(`Skipping unknown/unhandled job: "${name}"`);
       return JobStatus.Skipped;
     }
 
-    return item.handler(data);
-  }
-
-  setConcurrency(queueName: QueueName, concurrency: number) {
-    const worker = this.workers[queueName];
-    if (!worker) {
-      this.logger.warn(`Unable to set queue concurrency, worker not found: '${queueName}'`);
-      return;
+    this.inflight++;
+    try {
+      return await item.handler(data);
+    } finally {
+      this.inflight = Math.max(0, this.inflight - 1);
     }
-
-    worker.concurrency = concurrency;
   }
 
-  async isActive(name: QueueName): Promise<boolean> {
-    const queue = this.getQueue(name);
-    const count = await queue.getActiveCount();
-    return count > 0;
+  setConcurrency(_queueName: QueueName, _concurrency: number) {
+    // no-op for in-process queue
+  }
+
+  async isActive(_name: QueueName): Promise<boolean> {
+    return this.inflight > 0;
   }
 
   async isPaused(name: QueueName): Promise<boolean> {
-    return this.getQueue(name).isPaused();
+    return this.paused.has(name);
   }
 
-  pause(name: QueueName) {
-    return this.getQueue(name).pause();
+  async pause(name: QueueName) {
+    this.paused.add(name);
   }
 
-  resume(name: QueueName) {
-    return this.getQueue(name).resume();
+  async resume(name: QueueName) {
+    this.paused.delete(name);
   }
 
-  empty(name: QueueName) {
-    return this.getQueue(name).drain();
+  async empty(_name: QueueName) {
+    // nothing persisted to drain
   }
 
-  clear(name: QueueName, type: QueueCleanType) {
-    return this.getQueue(name).clean(0, 1000, type);
+  async clear(_name: QueueName, _type: QueueCleanType) {
+    // nothing persisted to clean
   }
 
-  getJobCounts(name: QueueName): Promise<JobCounts> {
-    return this.getQueue(name).getJobCounts(
-      'active',
-      'completed',
-      'failed',
-      'delayed',
-      'waiting',
-      'paused',
-    ) as unknown as Promise<JobCounts>;
-  }
-
-  private getQueueName(name: JobName) {
-    return (this.handlers[name] as JobMapItem).queueName;
+  async getJobCounts(_name: QueueName): Promise<JobCounts> {
+    return { active: this.inflight, completed: 0, failed: 0, delayed: 0, waiting: 0, paused: 0 };
   }
 
   async queueAll(items: JobItem[]): Promise<void> {
@@ -200,99 +144,42 @@ export class JobRepository {
       return;
     }
 
-    const promises = [];
-    const itemsByQueue = {} as Record<string, (JobItem & { data: any; options: JobsOptions | undefined })[]>;
     for (const item of items) {
-      const queueName = this.getQueueName(item.name);
-      const job = {
-        name: item.name,
-        data: item.data || {},
-        options: this.getJobOptions(item) || undefined,
-      } as JobItem & { data: any; options: JobsOptions | undefined };
-
-      if (job.options?.jobId || job.options?.deduplication) {
-        // need to use add() instead of addBulk() for jobId/deduplication to take effect
-        promises.push(this.getQueue(queueName).add(item.name, item.data, job.options));
-      } else {
-        itemsByQueue[queueName] ||= [];
-        itemsByQueue[queueName].push(job);
+      const queueName = this.handlers[item.name as JobName]?.queueName;
+      if (!queueName) {
+        this.logger.verbose(`Skipping unhandled job on queue: "${item.name}"`);
+        continue;
       }
-    }
 
-    for (const [queueName, jobs] of Object.entries(itemsByQueue)) {
-      const queue = this.getQueue(queueName as QueueName);
-      promises.push(queue.addBulk(jobs));
-    }
+      if (this.paused.has(queueName)) {
+        this.logger.verbose(`Queue "${queueName}" is paused, skipping job "${item.name}"`);
+        continue;
+      }
 
-    await Promise.all(promises);
+      // Dispatch in-process, non-blocking. Errors are logged but never crash the queue.
+      setImmediate(() => {
+        this.run(item).catch((error) => this.logger.error(`Job "${item.name}" failed: ${error}`));
+      });
+    }
   }
 
   async queue(item: JobItem): Promise<void> {
     return this.queueAll([item]);
   }
 
-  async waitForQueueCompletion(...queues: QueueName[]): Promise<void> {
-    const getPending = async () => {
-      const results = await Promise.all(queues.map(async (name) => ({ pending: await this.isActive(name), name })));
-      return results.filter(({ pending }) => pending).map(({ name }) => name);
-    };
-
-    let pending = await getPending();
-
-    while (pending.length > 0) {
-      this.logger.verbose(`Waiting for ${pending[0]} queue to stop...`);
-      await setTimeout(1000);
-      pending = await getPending();
+  async waitForQueueCompletion(..._queues: QueueName[]): Promise<void> {
+    while (this.inflight > 0) {
+      this.logger.verbose(`Waiting for ${this.inflight} in-flight job(s) to finish...`);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
 
-  async searchJobs(name: QueueName, dto: QueueJobSearchDto): Promise<QueueJobResponseDto[]> {
-    const jobs = await this.getQueue(name).getJobs(dto.status ?? Object.values(QueueJobStatus), 0, 1000);
-    return jobs.map((job) => {
-      const { id, name, timestamp, data } = job;
-      return { id, name: name as JobName, timestamp, data };
-    });
-  }
-
-  private getJobOptions(item: JobItem): JobsOptions | null {
-    switch (item.name) {
-      case JobName.NotifyAlbumUpdate: {
-        return {
-          jobId: `${item.data.id}/${item.data.recipientId}`,
-          delay: item.data?.delay,
-        };
-      }
-      case JobName.StorageTemplateMigrationSingle: {
-        return { jobId: item.data.id };
-      }
-      case JobName.PersonGenerateThumbnail: {
-        return { priority: 1 };
-      }
-      case JobName.FacialRecognitionQueueAll: {
-        return { deduplication: { id: JobName.FacialRecognitionQueueAll } };
-      }
-      case JobName.VersionCheck: {
-        return { deduplication: { id: JobName.VersionCheck } };
-      }
-      case JobName.DatabaseBackup: {
-        return { deduplication: { id: JobName.DatabaseBackup } };
-      }
-      default: {
-        return null;
-      }
-    }
-  }
-
-  private getQueue(queue: QueueName): Queue {
-    return this.moduleRef.get<Queue>(getQueueToken(queue), { strict: false });
+  async searchJobs(_name: QueueName, _dto: QueueJobSearchDto): Promise<QueueJobResponseDto[]> {
+    return [];
   }
 
   /** @deprecated */
-  // todo: remove this when asset notifications no longer need it.
-  public async removeJob(name: JobName, jobID: string): Promise<void> {
-    const existingJob = await this.getQueue(this.getQueueName(name)).getJob(jobID);
-    if (existingJob) {
-      await existingJob.remove();
-    }
+  public async removeJob(_name: JobName, _jobID: string): Promise<void> {
+    // no-op
   }
 }

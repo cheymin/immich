@@ -1,39 +1,40 @@
-.vscode/
-.github/
-.git/
-.env*
-*.log
-*.tmp
-*.temp
+# Version control
+.git
+.gitignore
+.github
 
-**/Dockerfile
-**/node_modules/
-**/.pnpm-store/
-**/dist/
-**/coverage/
-**/build/
+# Dependencies (built fresh in the image)
+**/node_modules
 
-design/
-docker/
-!docker/scripts
-
-docs/
-!docs/package.json
-!docs/package-lock.json
-
-e2e/
-!e2e/package.json
-!e2e/package-lock.json
-
-fastlane/
-machine-learning/
-misc/
-mobile/
-
-packages/sdk/build/
-
-server/upload/
-server/src/queries
-server/www/
-
+# Build outputs (built fresh in the image)
+server/dist
+web/build
 web/.svelte-kit
+packages/sdk/dist
+packages/plugin-sdk/dist
+packages/cli/dist
+packages/plugin-core/dist
+
+# Docs, design, mobile, e2e, machine-learning (not needed in lightweight image)
+docs
+design
+mobile
+e2e
+machine-learning
+fastlane
+readme_i18n
+deployment
+
+# Tests
+**/*.spec.ts
+**/*.spec.js
+server/test
+
+# Misc
+misc
+*.md
+!README.md
+mise.lock
+mise.toml
+renovate.json
+CODEOWNERS
