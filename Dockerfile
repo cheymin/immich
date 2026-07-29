@@ -29,7 +29,6 @@ WORKDIR /usr/src/app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .pnpmfile.cjs ./
 COPY server/package.json ./server/package.json
 COPY web/package.json ./web/package.json
-COPY i18n/package.json ./i18n/package.json
 COPY packages/sdk/package.json ./packages/sdk/package.json
 COPY packages/plugin-sdk/package.json ./packages/plugin-sdk/package.json
 COPY packages/cli/package.json ./packages/cli/package.json
