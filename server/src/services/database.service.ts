@@ -55,6 +55,18 @@ const messages = {
 export class DatabaseService extends BaseService {
   @OnEvent({ name: 'AppBootstrap', priority: BootstrapEventPriority.DatabaseService })
   async onBootstrap() {
+    // Lightweight SQLite build: skip all Postgres version checks, vector
+    // extension setup (pgvector/vectorchord), and PG-specific schema drift
+    // detection. Just run Kysely migrations and continue.
+    if (process.env.DB_PATH || process.env.IMMICH_DB_DRIVER === 'sqlite') {
+      this.logger.log('SQLite build detected — skipping Postgres/vector bootstrap checks');
+      const { database } = this.configRepository.getEnv();
+      if (!database.skipMigrations) {
+        await this.databaseRepository.runMigrations();
+      }
+      return;
+    }
+
     const version = await this.databaseRepository.getPostgresVersion();
     const current = semver.coerce(version);
     const postgresRange = this.databaseRepository.getPostgresVersionRange();
