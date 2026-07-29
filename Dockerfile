@@ -50,7 +50,10 @@ RUN pnpm --filter @immich/sdk --filter @immich/plugin-sdk build \
   && pnpm --filter immich-web build
 
 # Produce a pruned, production-only server deployment.
-RUN pnpm --filter immich --prod --no-optional deploy /output/server-pruned
+# Note: do NOT pass --no-optional — sharp's platform-specific native binaries
+# (@img/sharp-linux-x64 / @img/sharp-linux-arm64) ship as optional deps and
+# are required since this image does not bundle a global libvips.
+RUN pnpm --filter immich --prod deploy /output/server-pruned
 
 # ---- Runtime stage -----------------------------------------------------------
 FROM node:22-bookworm-slim AS runtime
