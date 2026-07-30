@@ -63,10 +63,15 @@ RUN pnpm --filter @immich/sdk build \
   && pnpm --filter immich-web build
 
 # Produce a pruned, production-only server deployment.
+# --legacy: pnpm v10+ refuses `deploy` unless inject-workspace-packages=true,
+# but we set it to false so workspace packages are symlinked (sharing
+# @immich/sdk's build/ with consumers). The legacy deploy implementation
+# predates that restriction and correctly bundles the symlinked workspace
+# deps (@immich/plugin-sdk, @immich/sql-tools) into the pruned tree.
 # Note: do NOT pass --no-optional — sharp's platform-specific native binaries
 # (@img/sharp-linux-x64 / @img/sharp-linux-arm64) ship as optional deps and
 # are required since this image does not bundle a global libvips.
-RUN pnpm --filter immich --prod deploy /output/server-pruned
+RUN pnpm --filter immich --prod deploy --legacy /output/server-pruned
 
 # ---- Runtime stage -----------------------------------------------------------
 FROM node:22-bookworm-slim AS runtime
