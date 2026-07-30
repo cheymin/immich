@@ -9,6 +9,15 @@ import { LoggingRepository } from 'src/repositories/logging.repository';
 import { bootstrapTelemetry } from 'src/repositories/telemetry.repository';
 
 export async function bootstrap() {
+  // Register a keepalive handle BEFORE any await. The microservices worker runs
+  // in a Worker thread and does not call app.listen() (no socket handle), and
+  // better-sqlite3 is synchronous (no libuv handle). During NestFactory.create()
+  // the AppBootstrap handlers run; once they complete there is a window with no
+  // pending handles, which causes the Worker thread's event loop to drain and
+  // the thread to exit with code 0 — before the keepalive at the end of this
+  // function could be registered. Installing it first eliminates that window.
+  const keepalive = setInterval(() => {}, 1 << 30);
+
   const { telemetry } = new ConfigRepository().getEnv();
   if (telemetry.metrics.size > 0) {
     bootstrapTelemetry(telemetry.microservicesPort);
@@ -35,15 +44,23 @@ export async function bootstrap() {
   await app.init();
   logger.log(`Immich Microservices is running [v${serverVersion}] [${environment}]`);
 
-  // Keepalive: the in-process job queue (no Redis/BullMQ) dispatches via
-  // setImmediate and holds no persistent handle. Without an explicit handle
-  // the Worker thread's event loop drains and the thread exits with code 0,
-  // tearing the container down via the supervisor. This interval guarantees
-  // the worker stays up.
-  setInterval(() => {}, 1 << 30);
+  // keepalive was registered at the top of bootstrap(); leave it running for
+  // the lifetime of the worker. It is intentionally never cleared.
+  void keepalive;
 }
 
 if (!isMainThread) {
+  // Surface anything that escapes the promise chain. Without these, an
+  // unhandled rejection in a Worker thread can cause a silent exit.
+  process.on('unhandledRejection', (reason) => {
+    console.error('microservices unhandledRejection:', reason);
+    process.exit(1);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('microservices uncaughtException:', err);
+    process.exit(1);
+  });
+
   bootstrap().catch((error) => {
     // Always surface bootstrap failures. Previously, ImmichStartupError was
     // swallowed (no console.error) and then rethrown, producing a silent
