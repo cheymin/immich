@@ -25,12 +25,14 @@ export async function bootstrap() {
   app.useLogger(logger);
   app.useWebSocketAdapter(new WebSocketAdapter(app));
 
-  // In the lightweight single-container build, microservices runs in a Worker
-  // thread and does not need to expose a TCP port — it processes jobs in
-  // process via the in-memory queue. Binding an ephemeral listener inside a
-  // Worker thread is also flaky in some hosted runtimes (HF Spaces) and can
-  // cause the thread to exit silently. So we deliberately do NOT call
-  // app.listen() here. The keepalive interval below holds the event loop.
+  // Explicitly initialise the app so onModuleInit runs and the AppBootstrap
+  // event is emitted (DatabaseService schema init, StorageService mount
+  // checks, QueueService setup, etc.). We deliberately do NOT call
+  // app.listen() — the microservices worker runs in a Worker thread and does
+  // not need a TCP port (jobs are processed in-process via the memory queue),
+  // and binding an ephemeral listener inside a Worker thread is flaky in some
+  // hosted runtimes. The keepalive interval below holds the event loop.
+  await app.init();
   logger.log(`Immich Microservices is running [v${serverVersion}] [${environment}]`);
 
   // Keepalive: the in-process job queue (no Redis/BullMQ) dispatches via

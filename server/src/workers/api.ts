@@ -13,7 +13,12 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(ApiModule, { bufferLogs: true });
   app.get(AppRepository).setCloseFn(() => app.close());
 
-  void configureExpress(app, {
+  // MUST be awaited — configureExpress calls app.listen(port) internally.
+  // The original code used `void configureExpress(...)`, which let bootstrap()
+  // resolve before listen() ever ran. In a forked child process the event loop
+  // then drained and the process exited with code 0 before the server could
+  // bind, killing the container via the supervisor's process.exit(0).
+  await configureExpress(app, {
     ssr: ApiService,
   });
 }
