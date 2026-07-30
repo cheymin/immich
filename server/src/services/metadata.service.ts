@@ -167,6 +167,17 @@ export class MetadataService extends BaseService {
 
       this.logger.log(`Initialized local reverse geocoder`);
     } catch (error: Error | any) {
+      // Lightweight build: the geodata files (/build/geodata/*.txt) are not
+      // bundled in the single-container image, so reverse geocoding is
+      // unavailable. Degrade gracefully instead of crashing the microservices
+      // worker — map markers still work, only country/state/city lookup is off.
+      if (error?.cause?.code === 'ENOENT' || error?.code === 'ENOENT') {
+        this.logger.warn(
+          'Geodata files not found — reverse geocoding disabled (map markers still work, city/country lookup unavailable)',
+        );
+        await this.jobRepository.resume(QueueName.MetadataExtraction).catch(() => {});
+        return;
+      }
       this.logger.error(`Unable to initialize reverse geocoding: ${error}`, error?.stack);
       throw new Error('Metadata service init failed', { cause: error });
     }
