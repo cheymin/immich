@@ -74,6 +74,15 @@ if [ "$RUN_AS_ROOT" = "1" ]; then
   chown -R postgres:postgres "$PG_DIR"
 fi
 
+# Clean up stale postmaster.pid left by an unclean shutdown (container kill,
+# OOM, etc.) — pg_ctl prints a scary warning and may refuse to start otherwise.
+if [ -f "$PG_DIR/postmaster.pid" ]; then
+  if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" status" >/dev/null 2>&1; then
+    echo "[entrypoint] Removing stale postmaster.pid"
+    rm -f "$PG_DIR/postmaster.pid"
+  fi
+fi
+
 # Start Postgres: listen only on localhost (internal use), socket + TCP.
 echo "[entrypoint] Starting Postgres on 127.0.0.1:$PG_PORT"
 pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l /data/postgres.log -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"
@@ -82,6 +91,12 @@ pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l /data/postgres.log -o \"-c listen_addr
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -tc \"SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'\" | grep -q 1 || $PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -c \"CREATE USER $PG_USER WITH PASSWORD '$PG_PASSWORD';\""
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -tc \"SELECT 1 FROM pg_database WHERE datname='$PG_DB'\" | grep -q 1 || $PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -c \"CREATE DATABASE $PG_DB OWNER $PG_USER;\""
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -c \"ALTER USER $PG_USER WITH PASSWORD '$PG_PASSWORD';\""
+
+# Pre-create the pgvector extension in the app database as a superuser.
+# Immich's onBootstrap requires a vector extension before it runs migrations,
+# and the app role isn't a superuser so it can't CREATE EXTENSION itself.
+# Doing it here (idempotently) lets migrations proceed.
+pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CREATE EXTENSION IF NOT EXISTS vector CASCADE;\"" || echo "[entrypoint] WARNING: could not create vector extension"
 
 # Point Immich at the bundled instance. sslmode=disable because it's loopback.
 export DB_HOSTNAME="127.0.0.1"

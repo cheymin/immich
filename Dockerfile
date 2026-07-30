@@ -86,6 +86,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     file \
     postgresql \
     postgresql-contrib \
+    postgresql-15-pgvector \
     postgresql-client \
     gosu \
   && rm -rf /var/lib/apt/lists/*
