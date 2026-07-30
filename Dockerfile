@@ -84,6 +84,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tini \
     file \
+    postgresql \
+    postgresql-contrib \
+    postgresql-client \
+    gosu \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
@@ -103,10 +107,15 @@ COPY --from=builder /usr/src/app/web/build /build/www
 COPY LICENSE /licenses/LICENSE.txt
 COPY LICENSE /LICENSE
 
+# Entrypoint that optionally starts a bundled Postgres on /data when no
+# external DB_URL/DB_HOSTNAME is provided, then execs the Immich server.
+COPY docker/immich-entrypoint.sh /usr/local/bin/immich-entrypoint.sh
+RUN chmod +x /usr/local/bin/immich-entrypoint.sh
+
 ENV PATH="${PATH}:/usr/src/app/server/bin"
 
 VOLUME /data
 EXPOSE 7860
 
-ENTRYPOINT ["tini", "--"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/immich-entrypoint.sh"]
 CMD ["node", "/usr/src/app/server/dist/main.js"]
