@@ -46,7 +46,11 @@ COPY web ./web
 COPY i18n ./i18n
 
 # Build internal packages, then server, then web.
-RUN pnpm --filter @immich/sdk --filter @immich/plugin-sdk build \
+# @immich/sdk must finish before @immich/plugin-sdk: plugin-sdk's esbuild
+# imports @immich/sdk at bundle time. pnpm runs workspace deps in topological
+# order, but chaining explicitly here avoids races under the GHA build cache.
+RUN pnpm --filter @immich/sdk build \
+  && pnpm --filter @immich/plugin-sdk build \
   && pnpm --filter immich build \
   && pnpm --filter immich-web build
 
