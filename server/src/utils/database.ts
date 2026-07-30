@@ -8,6 +8,7 @@ import {
   KyselyConfig,
   NotNull,
   OperandValueExpression,
+  ParseJSONResultsPlugin,
   ReferenceExpression,
   Selectable,
   SelectQueryBuilder,
@@ -16,7 +17,12 @@ import {
   SqlBool,
   SqliteDialect,
 } from 'kysely';
-import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
+// Lightweight SQLite build: use the SQLite JSON helpers (json_group_array /
+// json_object) instead of the Postgres ones (json_agg / to_json). The Postgres
+// helpers emit functions SQLite's JSON1 module does not provide. The SQLite
+// helpers require ParseJSONResultsPlugin (added to the Kysely config below) to
+// parse the returned JSON strings back into objects.
+import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { PostgresError } from 'postgres';
@@ -73,6 +79,11 @@ export const getKyselyConfig = (_connection: DatabaseConnectionParams): KyselyCo
 
   return {
     dialect: new SqliteDialect({ database }),
+    // Required by kysely/helpers/sqlite (jsonArrayFrom / jsonObjectFrom): the
+    // SQLite driver returns JSON columns as TEXT strings, so this plugin parses
+    // them back into JS objects to match the Postgres jsonb behaviour the rest
+    // of the codebase expects.
+    plugins: [new ParseJSONResultsPlugin()],
     log(event) {
       if (event.level !== 'error') {
         return;
@@ -176,11 +187,19 @@ function wrapDatabaseForBindings(db: Database.Database): Database.Database {
 
 const uniqueIds = (ids: string[]) => [...new Set(ids)];
 
-export const asUuid = (id: string | Expression<string>) => sql<string>`${id}::uuid`;
+// SQLite stores UUIDs as plain TEXT — there is no `uuid` type to cast to, and
+// `::uuid` is a Postgres-only cast syntax that SQLite rejects. Drop the cast so
+// the value is bound as a plain string parameter. (Callers that compared with
+// `= anyUuid(ids)` are handled separately with an `in` list.)
+export const asUuid = (id: string | Expression<string>) => sql<string>`${id}`;
 
 export const anyUuid = (ids: string[]) => sql<string>`any(${`{${ids}}`}::uuid[])`;
 
-export const asVector = (embedding: number[]) => sql<string>`${`[${embedding}]`}::vector`;
+// pgvector is not available in the lightweight SQLite build (smart search / face
+// embeddings were removed). Keep the symbol so the codebase compiles, but drop
+// the `::vector` cast — the value is bound as a JSON-style string and this
+// helper is never invoked at runtime in the slimmed build.
+export const asVector = (embedding: number[]) => sql<string>`${`[${embedding}]`}`;
 
 export const unnest = (array: string[]) => sql<Record<string, string>>`unnest(array[${sql.join(array)}]::text[])`;
 
@@ -301,9 +320,21 @@ export function withVideoPackets(eb: ExpressionBuilder<DB, 'asset' | 'asset_keyf
 }
 
 export function withSmartSearch<O>(qb: SelectQueryBuilder<DB, 'asset', O>) {
+  // SQLite helper (jsonObjectFrom) requires a SelectQueryBuilderExpression, but
+  // eb.table('smart_search') returns an ExpressionWrapper that lacks
+  // isSelectQueryBuilder. Use an explicit selectFrom so the helper gets a real
+  // SelectQueryBuilder. The leftJoin is kept so callers can still filter on
+  // smart_search columns; the sub-select just re-reads the joined row.
   return qb
     .leftJoin('smart_search', 'asset.id', 'smart_search.assetId')
-    .select((eb) => jsonObjectFrom(eb.table('smart_search')).as('smartSearch'));
+    .select((eb) =>
+      jsonObjectFrom(
+        eb
+          .selectFrom('smart_search')
+          .select(['smart_search.assetId', 'smart_search.embedding'])
+          .whereRef('smart_search.assetId', '=', 'asset.id'),
+      ).as('smartSearch'),
+    );
 }
 
 export function withFaces(eb: ExpressionBuilder<DB, 'asset'>, withHidden?: boolean, withDeletedFace?: boolean) {
