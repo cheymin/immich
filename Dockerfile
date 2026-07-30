@@ -77,6 +77,13 @@ RUN pnpm --filter immich --prod deploy --legacy /output/server-pruned
 FROM node:22-bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl gnupg ca-certificates \
+  && install -d /usr/share/postgresql-common/pgdg \
+  && curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail \
+     https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+     > /etc/apt/sources.list.d/pgdg.list \
+  && apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
     tesseract-ocr-chi-sim \
@@ -84,10 +91,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tini \
     file \
-    postgresql \
-    postgresql-contrib \
+    postgresql-15 \
+    postgresql-contrib-15 \
+    postgresql-client-15 \
     postgresql-15-pgvector \
-    postgresql-client \
     gosu \
   && rm -rf /var/lib/apt/lists/*
 
