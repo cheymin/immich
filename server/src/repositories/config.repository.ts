@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { citiesFile, IWorker } from 'src/constants';
 import { Telemetry } from 'src/decorators';
 import { EnvSchema } from 'src/dtos/env.dto';
+import { loadDbConfigFromStore } from 'src/bootstrap/db-config';
 import {
   DatabaseExtension,
   ImmichEnvironment,
@@ -171,6 +172,10 @@ const resolveHelmetFile = (helmetFile: 'true' | 'false' | string | undefined) =>
 };
 
 const getEnv = (): EnvData => {
+  // First-run database config: load persisted connection info (written by the
+  // setup wizard) into process.env before parsing, so the existing DB_* env
+  // schema picks it up. No-op when no config file exists.
+  loadDbConfigFromStore();
   const parseResult = EnvSchema.safeParse(process.env);
   if (!parseResult.success) {
     const messages = ['Invalid environment variables: '];

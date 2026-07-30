@@ -1,4 +1,4 @@
-import { DatabaseConnectionParams } from '@immich/sql-tools';
+import { createPostgres, DatabaseConnectionParams } from '@immich/sql-tools';
 import {
   AliasedRawBuilder,
   DeduplicateJoinsPlugin,
@@ -8,25 +8,16 @@ import {
   KyselyConfig,
   NotNull,
   OperandValueExpression,
-  ParseJSONResultsPlugin,
   ReferenceExpression,
   Selectable,
   SelectQueryBuilder,
   ShallowDehydrateObject,
   sql,
   SqlBool,
-  SqliteDialect,
 } from 'kysely';
-// Lightweight SQLite build: use the SQLite JSON helpers (json_group_array /
-// json_object) instead of the Postgres ones (json_agg / to_json). The Postgres
-// helpers emit functions SQLite's JSON1 module does not provide. The SQLite
-// helpers require ParseJSONResultsPlugin (added to the Kysely config below) to
-// parse the returned JSON strings back into objects.
-import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { PostgresError } from 'postgres';
-import Database from 'better-sqlite3';
+import { PostgresJSDialect } from 'kysely-postgres-js';
+import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
+import { Notice, PostgresError } from 'postgres';
 import { columns, lockableProperties, LockableProperty, Person } from 'src/database';
 import { DummyValue, GenerateSqlQueries } from 'src/decorators';
 import { AssetEditActionItem } from 'src/dtos/editing.dto';
@@ -53,37 +44,18 @@ import { AssetExifTable } from 'src/schema/tables/asset-exif.table';
 import { AudioStreamInfo, VectorExtension, VideoFormat, VideoPacketInfo, VideoStreamInfo } from 'src/types';
 import { fromChecksum } from 'src/utils/request';
 
-export const getKyselyConfig = (_connection: DatabaseConnectionParams): KyselyConfig => {
-  // Lightweight build: use a local SQLite database file instead of Postgres.
-  // The connection parameter is kept for signature compatibility but ignored;
-  // the file path is taken from DB_PATH (default /data/immich.db).
-  const dbPath = process.env.DB_PATH || '/data/immich.db';
-  const dir = dirname(dbPath);
-  if (dir) {
-    mkdirSync(dir, { recursive: true });
-  }
-  const rawDatabase = new Database(dbPath);
-  rawDatabase.pragma('journal_mode = WAL');
-  rawDatabase.pragma('busy_timeout = 5000');
-  rawDatabase.pragma('foreign_keys = ON');
-
-  // better-sqlite3 only accepts numbers, strings, bigints, Buffers and null as
-  // bound parameters. Postgres also accepts booleans (stored as bool) and JS
-  // objects (stored as jsonb). Kysely passes a single `parameters` array to
-  // stmt.all(parameters)/stmt.run(parameters), so we wrap the Database and
-  // transform each element of that array before it reaches better-sqlite3:
-  //   - boolean → 1/0
-  //   - plain object / array (jsonb value) → JSON string
-  //   - everything else passes through unchanged
-  const database = wrapDatabaseForBindings(rawDatabase);
-
+export const getKyselyConfig = (connection: DatabaseConnectionParams): KyselyConfig => {
   return {
-    dialect: new SqliteDialect({ database }),
-    // Required by kysely/helpers/sqlite (jsonArrayFrom / jsonObjectFrom): the
-    // SQLite driver returns JSON columns as TEXT strings, so this plugin parses
-    // them back into JS objects to match the Postgres jsonb behaviour the rest
-    // of the codebase expects.
-    plugins: [new ParseJSONResultsPlugin()],
+    dialect: new PostgresJSDialect({
+      postgres: createPostgres({
+        connection,
+        onNotice: (notice: Notice) => {
+          if (notice['severity'] !== 'NOTICE') {
+            console.warn('Postgres notice:', notice);
+          }
+        },
+      }),
+    }),
     log(event) {
       if (event.level !== 'error') {
         return;
@@ -103,103 +75,13 @@ export const getKyselyConfig = (_connection: DatabaseConnectionParams): KyselyCo
   };
 };
 
-/**
- * Wrap a better-sqlite3 Database so that bound parameters passed by Kysely
- * (which calls stmt.all(parameters)/stmt.run(parameters) with a single array)
- * are translated to SQLite-compatible types:
- *   boolean → 1/0, object/array (jsonb) → JSON string.
- */
-function wrapDatabaseForBindings(db: Database.Database): Database.Database {
-  const transform = (value: unknown): unknown => {
-    if (value === null || value === undefined) {
-      return value;
-    }
-    if (typeof value === 'boolean') {
-      return value ? 1 : 0;
-    }
-    // Date → ISO string. better-sqlite3 doesn't accept Date objects, and
-    // JSON.stringify(date) would wrap the value in extra quotes
-    // ('"2026-..."') corrupting timestamp columns. ISO-8601 strings sort
-    // lexicographically so date comparisons still work in SQLite.
-    if (value instanceof Date) {
-      return value.toISOString();
-    }
-    const t = typeof value;
-    if (t === 'number' || t === 'string' || t === 'bigint') {
-      return value;
-    }
-    if (Buffer.isBuffer(value)) {
-      return value;
-    }
-    // objects (plain objects, arrays) → JSON string (jsonb stored as TEXT)
-    return JSON.stringify(value);
-  };
-
-  const transformParams = (params: unknown[]): unknown[] => params.map(transform);
-
-  // Kysely's SQLite driver calls stmt.all(parameters)/stmt.run(parameters)/
-  // stmt.iterate(parameters) passing the FULL parameters array as a single
-  // argument (e.g. stmt.all([true])), while direct callers usually spread
-  // (e.g. stmt.all(true)). better-sqlite3 accepts both, but our rest-param
-  // wrapper would otherwise see [[true]] and JSON-stringify the inner array
-  // instead of converting the boolean. Normalise: if a single array argument
-  // was passed, treat it as the parameter list.
-  const normalize = (params: unknown[]): unknown[] =>
-    params.length === 1 && Array.isArray(params[0]) ? (params[0] as unknown[]) : params;
-
-  const wrapStatement = (stmt: Database.Statement): Database.Statement => {
-    const wrapper: Partial<Database.Statement> = {
-      get reader() {
-        return stmt.reader;
-      },
-      get source() {
-        return stmt.source;
-      },
-      bind(...params: unknown[]) {
-        return stmt.bind(transformParams(normalize(params)));
-      },
-      all(...params: unknown[]) {
-        return stmt.all(transformParams(normalize(params)));
-      },
-      get(...params: unknown[]) {
-        return stmt.get(transformParams(normalize(params)));
-      },
-      run(...params: unknown[]) {
-        return stmt.run(transformParams(normalize(params)));
-      },
-      iterate(...params: unknown[]) {
-        return stmt.iterate(transformParams(normalize(params)));
-      },
-    };
-    return wrapper as Database.Statement;
-  };
-
-  return new Proxy(db, {
-    get(target, prop, receiver) {
-      if (prop === 'prepare') {
-        return (sql: string) => wrapStatement(target.prepare(sql));
-      }
-      const val = Reflect.get(target, prop, receiver);
-      return typeof val === 'function' ? val.bind(target) : val;
-    },
-  });
-}
-
 const uniqueIds = (ids: string[]) => [...new Set(ids)];
 
-// SQLite stores UUIDs as plain TEXT — there is no `uuid` type to cast to, and
-// `::uuid` is a Postgres-only cast syntax that SQLite rejects. Drop the cast so
-// the value is bound as a plain string parameter. (Callers that compared with
-// `= anyUuid(ids)` are handled separately with an `in` list.)
-export const asUuid = (id: string | Expression<string>) => sql<string>`${id}`;
+export const asUuid = (id: string | Expression<string>) => sql<string>`${id}::uuid`;
 
 export const anyUuid = (ids: string[]) => sql<string>`any(${`{${ids}}`}::uuid[])`;
 
-// pgvector is not available in the lightweight SQLite build (smart search / face
-// embeddings were removed). Keep the symbol so the codebase compiles, but drop
-// the `::vector` cast — the value is bound as a JSON-style string and this
-// helper is never invoked at runtime in the slimmed build.
-export const asVector = (embedding: number[]) => sql<string>`${`[${embedding}]`}`;
+export const asVector = (embedding: number[]) => sql<string>`${`[${embedding}]`}::vector`;
 
 export const unnest = (array: string[]) => sql<Record<string, string>>`unnest(array[${sql.join(array)}]::text[])`;
 
@@ -320,21 +202,9 @@ export function withVideoPackets(eb: ExpressionBuilder<DB, 'asset' | 'asset_keyf
 }
 
 export function withSmartSearch<O>(qb: SelectQueryBuilder<DB, 'asset', O>) {
-  // SQLite helper (jsonObjectFrom) requires a SelectQueryBuilderExpression, but
-  // eb.table('smart_search') returns an ExpressionWrapper that lacks
-  // isSelectQueryBuilder. Use an explicit selectFrom so the helper gets a real
-  // SelectQueryBuilder. The leftJoin is kept so callers can still filter on
-  // smart_search columns; the sub-select just re-reads the joined row.
   return qb
     .leftJoin('smart_search', 'asset.id', 'smart_search.assetId')
-    .select((eb) =>
-      jsonObjectFrom(
-        eb
-          .selectFrom('smart_search')
-          .select(['smart_search.assetId', 'smart_search.embedding'])
-          .whereRef('smart_search.assetId', '=', 'asset.id'),
-      ).as('smartSearch'),
-    );
+    .select((eb) => jsonObjectFrom(eb.table('smart_search')).as('smartSearch'));
 }
 
 export function withFaces(eb: ExpressionBuilder<DB, 'asset'>, withHidden?: boolean, withDeletedFace?: boolean) {

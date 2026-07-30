@@ -1,5 +1,6 @@
 # Lightweight single-container Immich build.
-# - SQLite local database (no Postgres)
+# - External PostgreSQL (configured via first-run setup wizard at /api/setup/db,
+#   or via DB_URL / DB_HOSTNAME env vars; persisted to /data/db-config.json)
 # - In-process job queue (no Redis)
 # - Local Tesseract OCR (no machine-learning container)
 # - Local or S3 image storage
@@ -71,7 +72,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /usr/src/app
 
 ENV NODE_ENV=production \
-  DB_PATH=/data/immich.db \
   IMMICH_PORT=7860 \
   IMMICH_HOST=0.0.0.0 \
   TESSERACT_PATH=tesseract \

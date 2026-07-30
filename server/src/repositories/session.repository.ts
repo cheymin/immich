@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Insertable, Kysely, Updateable } from 'kysely';
-import { jsonObjectFrom } from 'kysely/helpers/sqlite';
+import { jsonObjectFrom } from 'kysely/helpers/postgres';
 import { DateTime } from 'luxon';
 import { InjectKysely } from 'nestjs-kysely';
 import { columns } from 'src/database';

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Insertable, Kysely, NotNull, sql } from 'kysely';
-import { jsonObjectFrom } from 'kysely/helpers/sqlite';
+import { jsonObjectFrom } from 'kysely/helpers/postgres';
 import { InjectKysely } from 'nestjs-kysely';
 import { columns } from 'src/database';
 import { DummyValue, GenerateSql } from 'src/decorators';

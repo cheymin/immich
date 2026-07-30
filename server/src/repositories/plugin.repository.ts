@@ -2,7 +2,7 @@ import { CallContext, Plugin as ExtismPlugin, newPlugin } from '@extism/extism';
 import { Injectable } from '@nestjs/common';
 import { createPool, Pool } from 'generic-pool';
 import { Insertable, Kysely } from 'kysely';
-import { jsonArrayFrom } from 'kysely/helpers/sqlite';
+import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { InjectKysely } from 'nestjs-kysely';
 import { columns } from 'src/database';
 import { DummyValue, GenerateSql } from 'src/decorators';

@@ -48,28 +48,6 @@ export class StorageService extends BaseService {
     StorageCore.setMediaLocation(this.detectMediaLocation());
     this.logger.log(`Media location set to: ${StorageCore.getMediaLocation()}`);
 
-    // Lightweight SQLite build: the single-container deployment stores files
-    // locally and has no external mounts to verify. Skip the mount-file probes
-    // (which can hang or fail on restricted filesystems like HF Spaces /data)
-    // and the media-location migration (no existing assets on first boot).
-    if (process.env.DB_PATH || process.env.IMMICH_DB_DRIVER === 'sqlite') {
-      this.logger.log('SQLite build detected — skipping mount folder checks');
-      // Ensure the storage folders exist so later writes don't fail.
-      for (const folder of Object.values(StorageFolder)) {
-        const folderPath = StorageCore.getBaseFolder(folder);
-        try {
-          this.storageRepository.mkdirSync(folderPath);
-        } catch (error: any) {
-          // best-effort: existence is fine, real failures surface on first write
-          if (error?.code !== 'EEXIST') {
-            this.logger.warn(`Could not create ${folderPath}: ${error?.message ?? error}`);
-          }
-        }
-      }
-      this.logger.log('Storage bootstrap complete');
-      return;
-    }
-
     await this.databaseRepository.withLock(DatabaseLock.SystemFileMounts, async () => {
       const flags =
         (await this.systemMetadataRepository.get(SystemMetadataKey.SystemFlags)) ||

@@ -24,7 +24,6 @@ import { DB } from 'src/schema';
 import { immich_uuid_v7 } from 'src/schema/functions';
 import { ExtensionVersion, VectorExtension } from 'src/types';
 import { vectorIndexQuery } from 'src/utils/database';
-import { initSqliteSchema } from 'src/utils/sqlite-schema';
 import z from 'zod';
 
 export let cachedVectorExtension: VectorExtension | undefined;
@@ -56,9 +55,6 @@ export const probes: Record<VectorIndex, number> = {
 @Injectable()
 export class DatabaseRepository {
   private readonly asyncLock = new AsyncLock();
-  // Single-container SQLite build: no cross-process advisory locks needed — the
-  // in-process AsyncLock in withLock() is sufficient.
-  private readonly isSqlite = !!(process.env.DB_PATH || process.env.IMMICH_DB_DRIVER === 'sqlite');
 
   constructor(
     @InjectKysely() private db: Kysely<DB>,
@@ -70,17 +66,6 @@ export class DatabaseRepository {
 
   async shutdown() {
     await this.db.destroy();
-  }
-
-  /**
-   * Lightweight SQLite build: create the full schema from the code-defined
-   * table decorators (via @immich/sql-tools) using SQLite-compatible DDL.
-   * Replaces the Postgres-only Kysely migration flow for the single-container
-   * build. Idempotent — safe to run on every boot.
-   */
-  async initSqliteSchema(): Promise<void> {
-    const statements = await initSqliteSchema(this.db);
-    this.logger.log(`SQLite schema initialised: ${statements.length} statements executed`);
   }
 
   getVectorExtension(): Promise<VectorExtension> {
@@ -472,16 +457,10 @@ export class DatabaseRepository {
   }
 
   private async acquireLock(lock: DatabaseLock, connection: Kysely<DB>): Promise<void> {
-    if (this.isSqlite) {
-      return; // in-process AsyncLock is sufficient
-    }
     await sql`SELECT pg_advisory_lock(${lock})`.execute(connection);
   }
 
   private async acquireTryLock(lock: DatabaseLock, connection: Kysely<DB>): Promise<boolean> {
-    if (this.isSqlite) {
-      return !this.asyncLock.isBusy(DatabaseLock[lock]); // best-effort in-process check
-    }
     const { rows } = await sql<{
       pg_try_advisory_lock: boolean;
     }>`SELECT pg_try_advisory_lock(${lock})`.execute(connection);
@@ -489,9 +468,6 @@ export class DatabaseRepository {
   }
 
   private async releaseLock(lock: DatabaseLock, connection: Kysely<DB>): Promise<void> {
-    if (this.isSqlite) {
-      return; // no-op
-    }
     await sql`SELECT pg_advisory_unlock(${lock})`.execute(connection);
   }
 

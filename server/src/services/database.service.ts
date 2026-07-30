@@ -55,16 +55,6 @@ const messages = {
 export class DatabaseService extends BaseService {
   @OnEvent({ name: 'AppBootstrap', priority: BootstrapEventPriority.DatabaseService })
   async onBootstrap() {
-    // Lightweight SQLite build: skip all Postgres version checks, vector
-    // extension setup (pgvector/vectorchord), PG-specific schema drift
-    // detection, and PG-only Kysely migrations. The schema is created from the
-    // code-defined table decorators using SQLite-compatible DDL instead.
-    if (process.env.DB_PATH || process.env.IMMICH_DB_DRIVER === 'sqlite') {
-      this.logger.log('SQLite build detected — initialising schema from code definitions');
-      await this.databaseRepository.initSqliteSchema();
-      return;
-    }
-
     const version = await this.databaseRepository.getPostgresVersion();
     const current = semver.coerce(version);
     const postgresRange = this.databaseRepository.getPostgresVersionRange();
