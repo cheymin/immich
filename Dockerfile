@@ -26,8 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /usr/src/app
 
-# Copy workspace manifests first for better layer caching.
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .pnpmfile.cjs ./
+# Copy workspace manifests first for better layer caching. .npmrc MUST be
+# present before `pnpm install` so node-linker=hoisted takes effect (without
+# it pnpm uses the isolated linker and @immich/plugin-sdk's esbuild cannot
+# resolve @immich/sdk's build/ output).
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc .pnpmfile.cjs ./
 COPY server/package.json ./server/package.json
 COPY web/package.json ./web/package.json
 COPY packages/sdk/package.json ./packages/sdk/package.json
