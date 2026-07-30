@@ -24,7 +24,18 @@ export class SystemMetadataRepository {
     if (!metadata) {
       return null;
     }
-    return metadata.value as SystemMetadata[T];
+    // SQLite stores jsonb columns as TEXT; parse back to object/array for
+    // compatibility with Postgres jsonb behaviour. Primitives (already parsed
+    // by the driver) pass through.
+    const val = metadata.value as unknown;
+    if (typeof val === 'string') {
+      try {
+        return JSON.parse(val) as SystemMetadata[T];
+      } catch {
+        return val as unknown as SystemMetadata[T];
+      }
+    }
+    return val as SystemMetadata[T];
   }
 
   async set<T extends keyof SystemMetadata>(key: T, value: SystemMetadata[T]): Promise<void> {

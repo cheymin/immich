@@ -56,10 +56,20 @@ export const getKyselyConfig = (_connection: DatabaseConnectionParams): KyselyCo
   if (dir) {
     mkdirSync(dir, { recursive: true });
   }
-  const database = new Database(dbPath);
-  database.pragma('journal_mode = WAL');
-  database.pragma('busy_timeout = 5000');
-  database.pragma('foreign_keys = ON');
+  const rawDatabase = new Database(dbPath);
+  rawDatabase.pragma('journal_mode = WAL');
+  rawDatabase.pragma('busy_timeout = 5000');
+  rawDatabase.pragma('foreign_keys = ON');
+
+  // SQLite can only bind primitives (numbers, strings, bigints, buffers, null).
+  // Postgres jsonb columns receive JS objects directly, but better-sqlite3
+  // throws "SQLite3 can only bind numbers, strings, bigints, buffers, and null"
+  // when an object/array is passed as a parameter. Wrap the database so that
+  // any object/array parameter is automatically JSON.stringify'd before binding.
+  // This fixes all jsonb writes (system_metadata, user_metadata, asset_metadata,
+  // etc.) without touching individual repositories.
+  const database = wrapDatabaseForJson(rawDatabase);
+
   return {
     dialect: new SqliteDialect({ database }),
     log(event) {
@@ -80,6 +90,60 @@ export const getKyselyConfig = (_connection: DatabaseConnectionParams): KyselyCo
     },
   };
 };
+
+/**
+ * Wrap a better-sqlite3 Database so that any object/array parameters passed to
+ * Statement methods (all/get/run/bind/iterate) are automatically serialised to
+ * JSON strings. This bridges the Postgres jsonb ↔ SQLite TEXT gap for writes.
+ * Primitives (number, string, bigint, Buffer, null, boolean) pass through
+ * unchanged.
+ */
+function wrapDatabaseForJson(db: Database.Database): Database.Database {
+  const transformParams = (params: unknown[]): unknown[] =>
+    params.map((p) => {
+      if (p === null || p === undefined) {
+        return p;
+      }
+      const t = typeof p;
+      if (t === 'number' || t === 'string' || t === 'bigint' || t === 'boolean') {
+        return p;
+      }
+      if (Buffer.isBuffer(p)) {
+        return p;
+      }
+      // objects (plain objects, arrays) → JSON string
+      return JSON.stringify(p);
+    });
+
+  const wrapStatement = (stmt: Database.Statement) =>
+    new Proxy(stmt, {
+      get(target, prop, receiver) {
+        const val = Reflect.get(target, prop, receiver);
+        if (typeof val !== 'function') {
+          return val;
+        }
+        if (prop === 'all' || prop === 'get' || prop === 'run' || prop === 'bind' || prop === 'iterate') {
+          return (...args: unknown[]) => {
+            // better-sqlite3 supports both bind(...) and method(...params) forms
+            const transformed = transformParams(args);
+            return val.apply(target, transformed);
+          };
+        }
+        return val.bind(target);
+      },
+    });
+
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === 'prepare') {
+        const originalPrepare = target.prepare.bind(target);
+        return (sql: string) => wrapStatement(originalPrepare(sql));
+      }
+      const val = Reflect.get(target, prop, receiver);
+      return typeof val === 'function' ? val.bind(target) : val;
+    },
+  });
+}
 
 const uniqueIds = (ids: string[]) => [...new Set(ids)];
 
