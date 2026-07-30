@@ -39,10 +39,14 @@ export class SystemMetadataRepository {
   }
 
   async set<T extends keyof SystemMetadata>(key: T, value: SystemMetadata[T]): Promise<void> {
+    // SQLite stores jsonb columns as TEXT, so serialise the value to a JSON
+    // string before binding (Postgres accepts objects directly, SQLite does not).
+    const stringValue =
+      typeof value === 'object' && value !== null ? JSON.stringify(value) : (value as unknown);
     await this.db
       .insertInto('system_metadata')
-      .values({ key, value } as Upsert)
-      .onConflict((oc) => oc.columns(['key']).doUpdateSet({ value } as Upsert))
+      .values({ key, value: stringValue } as Upsert)
+      .onConflict((oc) => oc.columns(['key']).doUpdateSet({ value: stringValue } as Upsert))
       .execute();
   }
 
