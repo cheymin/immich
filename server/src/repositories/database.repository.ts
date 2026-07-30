@@ -56,6 +56,9 @@ export const probes: Record<VectorIndex, number> = {
 @Injectable()
 export class DatabaseRepository {
   private readonly asyncLock = new AsyncLock();
+  // Single-container SQLite build: no cross-process advisory locks needed — the
+  // in-process AsyncLock in withLock() is sufficient.
+  private readonly isSqlite = !!(process.env.DB_PATH || process.env.IMMICH_DB_DRIVER === 'sqlite');
 
   constructor(
     @InjectKysely() private db: Kysely<DB>,
@@ -469,10 +472,16 @@ export class DatabaseRepository {
   }
 
   private async acquireLock(lock: DatabaseLock, connection: Kysely<DB>): Promise<void> {
+    if (this.isSqlite) {
+      return; // in-process AsyncLock is sufficient
+    }
     await sql`SELECT pg_advisory_lock(${lock})`.execute(connection);
   }
 
   private async acquireTryLock(lock: DatabaseLock, connection: Kysely<DB>): Promise<boolean> {
+    if (this.isSqlite) {
+      return !this.asyncLock.isBusy(DatabaseLock[lock]); // best-effort in-process check
+    }
     const { rows } = await sql<{
       pg_try_advisory_lock: boolean;
     }>`SELECT pg_try_advisory_lock(${lock})`.execute(connection);
@@ -480,6 +489,9 @@ export class DatabaseRepository {
   }
 
   private async releaseLock(lock: DatabaseLock, connection: Kysely<DB>): Promise<void> {
+    if (this.isSqlite) {
+      return; // no-op
+    }
     await sql`SELECT pg_advisory_unlock(${lock})`.execute(connection);
   }
 
