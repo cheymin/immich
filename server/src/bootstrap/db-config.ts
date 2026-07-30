@@ -1,6 +1,14 @@
 import { createPostgres, DatabaseSslMode } from '@immich/sql-tools';
+import { setDefaultResultOrder } from 'node:dns';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+
+// Force IPv4-first DNS resolution. Some container runtimes (e.g. HF Spaces)
+// block outbound IPv6, so a host whose DNS returns an AAAA record (common for
+// Supabase / Neon) fails with ENETUNREACH before IPv4 is even tried. This runs
+// at module load — db-config is imported by the main process, the setup wizard,
+// and every worker — so it covers all processes that open DB connections.
+setDefaultResultOrder('ipv4first');
 
 // Path to the persisted database configuration written by the first-run setup
 // wizard. Stored on the /data volume so it survives container restarts.
