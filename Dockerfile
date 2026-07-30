@@ -26,10 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /usr/src/app
 
-# Copy workspace manifests first for better layer caching. .npmrc MUST be
-# present before `pnpm install` so node-linker=hoisted takes effect (without
-# it pnpm uses the isolated linker and @immich/plugin-sdk's esbuild cannot
-# resolve @immich/sdk's build/ output).
+# Copy workspace manifests first for better layer caching. .npmrc carries
+# fetch-retry/timeout settings so transient npm registry failures don't
+# abort the multi-arch install.
+# injectWorkspacePackages is set to false in pnpm-workspace.yaml so pnpm
+# SYMLINKS workspace packages (e.g. @immich/sdk) into node_modules instead
+# of copying them at install time. The copy happened before `build/`
+# existed, leaving consumers unable to resolve @immich/sdk's types/JS; a
+# symlink shares packages/sdk/build/ as soon as `pnpm --filter @immich/sdk
+# build` runs.
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc .pnpmfile.cjs ./
 COPY server/package.json ./server/package.json
 COPY web/package.json ./web/package.json

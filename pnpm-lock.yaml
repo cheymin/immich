@@ -3,7 +3,6 @@ lockfileVersion: '9.0'
 settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
-  injectWorkspacePackages: true
 
 overrides:
   canvas: 3.2.3
@@ -119,7 +118,7 @@ importers:
         version: link:../packages/e2e-auth-server
       '@immich/sdk':
         specifier: workspace:*
-        version: file:packages/sdk
+        version: link:../packages/sdk
       '@playwright/test':
         specifier: ^1.44.1
         version: 1.61.1
@@ -225,7 +224,7 @@ importers:
         version: 10.0.1(eslint@10.7.0(jiti@2.7.0))
       '@immich/sdk':
         specifier: workspace:*
-        version: file:packages/sdk
+        version: link:../sdk
       '@types/byte-size':
         specifier: ^8.1.0
         version: 8.1.2
@@ -327,7 +326,7 @@ importers:
         version: link:../plugin-sdk
       '@immich/sdk':
         specifier: workspace:*
-        version: file:packages/sdk
+        version: link:../sdk
       esbuild:
         specifier: ^0.28.0
         version: 0.28.1
@@ -346,7 +345,7 @@ importers:
         version: 1.1.1
       '@immich/sdk':
         specifier: workspace:*
-        version: file:packages/sdk
+        version: link:../sdk
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3
@@ -796,7 +795,7 @@ importers:
         version: 0.4.3
       '@immich/sdk':
         specifier: workspace:*
-        version: file:packages/sdk
+        version: link:../packages/sdk
       '@immich/ui':
         specifier: ^0.83.0
         version: 0.83.0(@sveltejs/kit@2.69.3(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.5(@typescript-eslint/types@8.64.0))(vite@8.1.5(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(sass@1.101.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0)))(@typescript/typescript6@6.0.2)(svelte@5.56.5(@typescript-eslint/types@8.64.0))(vite@8.1.5(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(sass@1.101.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0)))(svelte@5.56.5(@typescript-eslint/types@8.64.0))
@@ -3105,9 +3104,6 @@ packages:
 
   '@immich/justified-layout-wasm@0.4.3':
     resolution: {integrity: sha512-fpcQ7zPhP3Cp1bEXhONVYSUeIANa2uzaQFGKufUZQo5FO7aFT77szTVChhlCy4XaVy5R4ZvgSkA/1TJmeORz7Q==}
-
-  '@immich/sdk@file:packages/sdk':
-    resolution: {directory: packages/sdk, type: directory}
 
   '@immich/sql-tools@0.5.2':
     resolution: {integrity: sha512-O1SJ+BbeFVsUTF4af1MfagJZM+lPgLjI8lQ3SZNjpo8SGJReSbUl2ii03OKuGni/G0yp2GnRLpOTNSHYGtVrcg==}
@@ -16006,10 +16002,6 @@ snapshots:
     optional: true
 
   '@immich/justified-layout-wasm@0.4.3': {}
-
-  '@immich/sdk@file:packages/sdk':
-    dependencies:
-      '@oazapfts/runtime': 1.2.0
 
   '@immich/sql-tools@0.5.2':
     dependencies:

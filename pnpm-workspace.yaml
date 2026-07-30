@@ -62,7 +62,7 @@ packageExtensions:
       typescript: '*'
 dedupePeerDependents: false
 preferWorkspacePackages: true
-injectWorkspacePackages: true
+injectWorkspacePackages: false
 shamefullyHoist: false
 verifyDepsBeforeRun: install
 minimumReleaseAgeExclude:
