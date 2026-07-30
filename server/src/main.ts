@@ -100,10 +100,18 @@ class Workers {
   }
 
   onError(name: ImmichWorker, error: Error) {
-    console.error(`${name} worker error: ${error}, stack: ${error.stack}`);
+    // Errors from Worker threads may arrive as plain objects (no stack).
+    // Normalise so we always see something useful.
+    const msg = error instanceof Error ? error.message : String(error);
+    const stack = error instanceof Error ? error.stack : undefined;
+    console.error(`${name} worker error: ${msg}`, stack ?? '(no stack)');
   }
 
   onExit(name: ImmichWorker, exitCode: number | null) {
+    // Always log exits — a silent code-0 exit is the most common cause of
+    // mysterious container restarts, so make it visible.
+    console.log(`${name} worker exited with code ${exitCode}`);
+
     // restart immich server
     if (exitCode === ExitCode.AppRestart || this.restarting) {
       this.restarting = true;
@@ -124,8 +132,6 @@ class Workers {
     delete this.workers[name];
 
     if (exitCode !== 0) {
-      console.error(`${name} worker exited with code ${exitCode}`);
-
       if (Object.hasOwn(this.workers, ImmichWorker.Api) && name !== ImmichWorker.Api) {
         console.error('Killing api process');
         void this.workers[ImmichWorker.Api]!.kill('SIGTERM');

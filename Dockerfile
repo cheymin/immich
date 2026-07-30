@@ -75,7 +75,8 @@ ENV NODE_ENV=production \
   IMMICH_PORT=7860 \
   IMMICH_HOST=0.0.0.0 \
   TESSERACT_PATH=tesseract \
-  TESSERACT_LANG=eng
+  TESSERACT_LANG=eng \
+  IMMICH_STORAGE_IGNORE_MOUNT_CHECK_ERRORS=true
 
 # Server (built artifacts + pruned prod node_modules)
 COPY --from=builder /output/server-pruned ./server
