@@ -56,10 +56,21 @@ export const getKyselyConfig = (_connection: DatabaseConnectionParams): KyselyCo
   if (dir) {
     mkdirSync(dir, { recursive: true });
   }
-  const database = new Database(dbPath);
-  database.pragma('journal_mode = WAL');
-  database.pragma('busy_timeout = 5000');
-  database.pragma('foreign_keys = ON');
+  const rawDatabase = new Database(dbPath);
+  rawDatabase.pragma('journal_mode = WAL');
+  rawDatabase.pragma('busy_timeout = 5000');
+  rawDatabase.pragma('foreign_keys = ON');
+
+  // better-sqlite3 only accepts numbers, strings, bigints, Buffers and null as
+  // bound parameters. Postgres also accepts booleans (stored as bool) and JS
+  // objects (stored as jsonb). Kysely passes a single `parameters` array to
+  // stmt.all(parameters)/stmt.run(parameters), so we wrap the Database and
+  // transform each element of that array before it reaches better-sqlite3:
+  //   - boolean → 1/0
+  //   - plain object / array (jsonb value) → JSON string
+  //   - everything else passes through unchanged
+  const database = wrapDatabaseForBindings(rawDatabase);
+
   return {
     dialect: new SqliteDialect({ database }),
     log(event) {
@@ -80,6 +91,88 @@ export const getKyselyConfig = (_connection: DatabaseConnectionParams): KyselyCo
     },
   };
 };
+
+/**
+ * Wrap a better-sqlite3 Database so that bound parameters passed by Kysely
+ * (which calls stmt.all(parameters)/stmt.run(parameters) with a single array)
+ * are translated to SQLite-compatible types:
+ *   boolean → 1/0, object/array (jsonb) → JSON string.
+ */
+function wrapDatabaseForBindings(db: Database.Database): Database.Database {
+  const transform = (value: unknown): unknown => {
+    if (value === null || value === undefined) {
+      return value;
+    }
+    if (typeof value === 'boolean') {
+      return value ? 1 : 0;
+    }
+    // Date → ISO string. better-sqlite3 doesn't accept Date objects, and
+    // JSON.stringify(date) would wrap the value in extra quotes
+    // ('"2026-..."') corrupting timestamp columns. ISO-8601 strings sort
+    // lexicographically so date comparisons still work in SQLite.
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+    const t = typeof value;
+    if (t === 'number' || t === 'string' || t === 'bigint') {
+      return value;
+    }
+    if (Buffer.isBuffer(value)) {
+      return value;
+    }
+    // objects (plain objects, arrays) → JSON string (jsonb stored as TEXT)
+    return JSON.stringify(value);
+  };
+
+  const transformParams = (params: unknown[]): unknown[] => params.map(transform);
+
+  // Kysely's SQLite driver calls stmt.all(parameters)/stmt.run(parameters)/
+  // stmt.iterate(parameters) passing the FULL parameters array as a single
+  // argument (e.g. stmt.all([true])), while direct callers usually spread
+  // (e.g. stmt.all(true)). better-sqlite3 accepts both, but our rest-param
+  // wrapper would otherwise see [[true]] and JSON-stringify the inner array
+  // instead of converting the boolean. Normalise: if a single array argument
+  // was passed, treat it as the parameter list.
+  const normalize = (params: unknown[]): unknown[] =>
+    params.length === 1 && Array.isArray(params[0]) ? (params[0] as unknown[]) : params;
+
+  const wrapStatement = (stmt: Database.Statement): Database.Statement => {
+    const wrapper: Partial<Database.Statement> = {
+      get reader() {
+        return stmt.reader;
+      },
+      get source() {
+        return stmt.source;
+      },
+      bind(...params: unknown[]) {
+        return stmt.bind(transformParams(normalize(params)));
+      },
+      all(...params: unknown[]) {
+        return stmt.all(transformParams(normalize(params)));
+      },
+      get(...params: unknown[]) {
+        return stmt.get(transformParams(normalize(params)));
+      },
+      run(...params: unknown[]) {
+        return stmt.run(transformParams(normalize(params)));
+      },
+      iterate(...params: unknown[]) {
+        return stmt.iterate(transformParams(normalize(params)));
+      },
+    };
+    return wrapper as Database.Statement;
+  };
+
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === 'prepare') {
+        return (sql: string) => wrapStatement(target.prepare(sql));
+      }
+      const val = Reflect.get(target, prop, receiver);
+      return typeof val === 'function' ? val.bind(target) : val;
+    },
+  });
+}
 
 const uniqueIds = (ids: string[]) => [...new Set(ids)];
 
