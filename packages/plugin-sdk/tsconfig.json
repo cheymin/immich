@@ -12,9 +12,7 @@
     "noUncheckedSideEffectImports": true,
     "outDir": "./dist",
     "paths": {
-      "src/*": ["./src/*"],
-      "@immich/sdk": ["../sdk/build/index.d.ts"],
-      "*": ["./*"]
+      "src/*": ["./src/*"]
     },
     "removeComments": true,
     "rootDir": "./src",
