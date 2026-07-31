@@ -53,6 +53,10 @@ class Workers {
     try {
       const value = await systemMetadataRepository.get(SystemMetadataKey.MaintenanceMode);
       return value?.isMaintenanceMode || false;
+    } catch {
+      // Fresh database — system_metadata table doesn't exist yet because
+      // migrations haven't run. Not in maintenance mode.
+      return false;
     } finally {
       await kysely.destroy();
     }
