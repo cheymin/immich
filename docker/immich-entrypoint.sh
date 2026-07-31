@@ -69,8 +69,11 @@ if [ ! -s "$PG_DIR/PG_VERSION" ]; then
 fi
 
 # Always make sure the data dir is owned by the postgres user (root case) or
-# current user (non-root case).
+# current user (non-root case). /data itself may be root-owned after a volume
+# remount (HF Spaces resets ownership on restart), so chown the top-level dir
+# too — otherwise postgres can't write a log file at /data/*.log.
 if [ "$RUN_AS_ROOT" = "1" ]; then
+  chown postgres:postgres /data 2>/dev/null || true
   chown -R postgres:postgres "$PG_DIR"
 fi
 
@@ -85,7 +88,9 @@ fi
 
 # Start Postgres: listen only on localhost (internal use), socket + TCP.
 echo "[entrypoint] Starting Postgres on 127.0.0.1:$PG_PORT"
-pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l /data/postgres.log -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"
+# Log lives inside PG_DIR (owned by the postgres user) — /data itself may be
+# root-owned after a volume remount, so writing /data/postgres.log fails.
+pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_DIR/server.log\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"
 
 # Create the app database + role if missing (idempotent).
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -tc \"SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'\" | grep -q 1 || $PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -c \"CREATE USER $PG_USER WITH PASSWORD '$PG_PASSWORD';\""
