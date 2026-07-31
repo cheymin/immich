@@ -120,20 +120,43 @@ fi
 # Start Postgres: listen only on localhost (internal use), socket + TCP.
 # Log lives inside PG_DIR (owned by the postgres user) — /data itself may be
 # root-owned after a volume remount.
+#
+# Use a long start timeout (-t 180). After an unclean shutdown, crash recovery
+# fsyncs the entire data directory; on HF Spaces' persistent volume this can
+# take well over a minute. The default pg_ctl timeout is 60s, which causes
+# pg_ctl to report "server did not start in time" and exit — even though the
+# postgres process is still alive and fsyncing in the background. That false
+# failure then triggers the WAL-reset path, which conflicts with the still-
+# running postgres (postmaster.pid lock) and wedges startup for real.
 echo "[entrypoint] Starting Postgres on 127.0.0.1:$PG_PORT"
-if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"; then
-  # First start failed. The most common cause on hosted runtimes is a torn WAL
-  # head left by an unclean shutdown (the recovery log shows "invalid record
-  # length at ..."). pg_resetwal advances the WAL position past the corrupt
-  # segment so postgres can come up. It is the documented recovery tool for
-  # exactly this symptom and does not touch table data. We only run it when the
-  # data dir already exists (not a fresh initdb) — a fresh init that fails is a
-  # real error and should surface.
+if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w -t 180"; then
+  # First start failed. Before attempting WAL reset, make absolutely sure no
+  # postgres process is still running against this data dir — pg_ctl's -w may
+  # have timed out while postgres was still doing crash-recovery fsync, leaving
+  # a live process holding postmaster.pid. pg_resetwal refuses to run while
+  # that pid file exists, and a second pg_ctl start would collide with it.
+  echo "[entrypoint] First start failed — stopping any lingering postgres process"
+  pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" stop -m immediate -w -t 30" 2>/dev/null || true
+  # Force-kill anything still holding the data dir, then remove the pid file.
+  if [ -f "$PG_DIR/postmaster.pid" ]; then
+    OLD_PID=$(head -1 "$PG_DIR/postmaster.pid" 2>/dev/null || true)
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+      echo "[entrypoint] Killing stale postgres PID $OLD_PID"
+      kill -9 "$OLD_PID" 2>/dev/null || true
+      sleep 2
+    fi
+    rm -f "$PG_DIR/postmaster.pid"
+  fi
+
+  # Now attempt WAL reset recovery. Only on an existing data dir (not a fresh
+  # initdb). pg_resetwal advances the WAL position past a torn segment — the
+  # documented recovery tool for the "invalid record length" symptom seen in
+  # crash recovery. It does not touch table data.
   if [ -s "$PG_DIR/PG_VERSION" ]; then
-    echo "[entrypoint] First start failed — attempting WAL reset recovery"
+    echo "[entrypoint] Attempting WAL reset recovery"
     pg_exec "$PG_BIN/pg_resetwal -f \"$PG_DIR\"" || true
-    # Retry the start once.
-    if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"; then
+    # Retry the start once, still with the long timeout.
+    if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w -t 180"; then
       echo "[entrypoint] FATAL: Postgres failed to start after WAL reset. Server log follows:" >&2
       echo "----- BEGIN $PG_LOG -----" >&2
       cat "$PG_LOG" >&2 2>/dev/null || echo "(could not read $PG_LOG)" >&2
