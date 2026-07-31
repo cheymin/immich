@@ -81,6 +81,30 @@ chmod 0700 "$PG_DIR"
 if [ ! -s "$PG_DIR/PG_VERSION" ]; then
   echo "[entrypoint] Initialising database cluster at $PG_DIR"
   pg_exec "$PG_BIN/initdb -D \"$PG_DIR\" -U postgres --encoding=UTF8 --locale=C --auth-local=trust --auth-host=trust"
+  # Write aggressive checkpoint tuning so commits land on disk quickly. HF Spaces
+  # kills containers hard (SIGKILL, no graceful shutdown), so the default
+  # checkpoint settings (5min / high max_wal_size) leave a large window of
+  # un-checkpointed WAL. If we then have to pg_resetwal, those commits are lost
+  # — which is exactly the "restart resets to setup screen" symptom.
+  cat >> "$PG_DIR/postgresql.conf" <<'PGCONF'
+
+# --- HF Spaces survival tuning ---
+# Checkpoint frequently so committed transactions hit the data files fast.
+# This trades some write throughput for durability on hard-killed containers.
+checkpoint_timeout = '30s'
+max_wal_size = '256MB'
+min_wal_size = '64MB'
+checkpoint_completion_target = 0.9
+# synchronous_commit=on (default) is fine — we want every commit fsynced.
+PGCONF
+  if [ "$RUN_AS_ROOT" = "1" ]; then
+    chown postgres:postgres "$PG_DIR/postgresql.conf"
+  fi
+else
+  echo "[entrypoint] Existing database cluster found (PG_VERSION present)"
+  # Diagnose what's in the data dir so we can see if data survived the restart.
+  echo "[entrypoint] Data dir listing (top level):"
+  ls -la "$PG_DIR" 2>/dev/null | head -20 | sed 's/^/[entrypoint]   /'
 fi
 
 # Recreate any missing standard runtime subdirectories. initdb creates these,
@@ -129,7 +153,11 @@ fi
 # failure then triggers the WAL-reset path, which conflicts with the still-
 # running postgres (postmaster.pid lock) and wedges startup for real.
 echo "[entrypoint] Starting Postgres on 127.0.0.1:$PG_PORT"
-if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w -t 180"; then
+# First attempt: long timeout (crash recovery fsync is slow on HF volumes).
+# Pass checkpoint tuning via -o so it applies even on existing clusters that
+# were initialised before the postgresql.conf tuning was added.
+PG_OPTS="-c listen_addresses=127.0.0.1 -c port=$PG_PORT -c checkpoint_timeout=30s -c max_wal_size=256MB"
+if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"$PG_OPTS\" start -w -t 180"; then
   # First start failed. Before attempting WAL reset, make absolutely sure no
   # postgres process is still running against this data dir — pg_ctl's -w may
   # have timed out while postgres was still doing crash-recovery fsync, leaving
@@ -148,22 +176,27 @@ if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addres
     rm -f "$PG_DIR/postmaster.pid"
   fi
 
-  # Now attempt WAL reset recovery. Only on an existing data dir (not a fresh
-  # initdb). pg_resetwal advances the WAL position past a torn segment — the
-  # documented recovery tool for the "invalid record length" symptom seen in
-  # crash recovery. It does not touch table data.
-  if [ -s "$PG_DIR/PG_VERSION" ]; then
-    echo "[entrypoint] Attempting WAL reset recovery"
+  # Retry WITHOUT WAL reset first. pg_ctl -w may have simply timed out during
+  # crash-recovery fsync while the server was otherwise healthy. Give it a
+  # second chance with the same long timeout before resorting to the more
+  # destructive pg_resetwal (which can lose un-checkpointed commits).
+  echo "[entrypoint] Retrying start (no WAL reset yet)"
+  if pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"$PG_OPTS\" start -w -t 180"; then
+    echo "[entrypoint] Postgres started on second attempt (no WAL reset needed)"
+  elif [ -s "$PG_DIR/PG_VERSION" ]; then
+    # Last resort: WAL reset. This advances the WAL position past a torn
+    # segment. WARNING: un-checkpointed committed transactions will be lost.
+    # With checkpoint_timeout=30s the window is small, but non-zero.
+    echo "[entrypoint] Second start failed — attempting WAL reset as last resort"
     pg_exec "$PG_BIN/pg_resetwal -f \"$PG_DIR\"" || true
-    # Retry the start once, still with the long timeout.
-    if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w -t 180"; then
+    if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"$PG_OPTS\" start -w -t 180"; then
       echo "[entrypoint] FATAL: Postgres failed to start after WAL reset. Server log follows:" >&2
       echo "----- BEGIN $PG_LOG -----" >&2
       cat "$PG_LOG" >&2 2>/dev/null || echo "(could not read $PG_LOG)" >&2
       echo "----- END $PG_LOG -----" >&2
       exit 1
     fi
-    echo "[entrypoint] Recovered via WAL reset — Postgres started on second attempt"
+    echo "[entrypoint] Recovered via WAL reset — Postgres started on third attempt (DATA LOSS POSSIBLE)"
   else
     echo "[entrypoint] FATAL: Postgres failed to start. Server log follows:" >&2
     echo "----- BEGIN $PG_LOG -----" >&2
@@ -171,6 +204,15 @@ if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addres
     echo "----- END $PG_LOG -----" >&2
     exit 1
   fi
+fi
+
+# Diagnostic: show whether the app database has user data. If tables exist but
+# the user_count is 0, the WAL reset likely wiped the admin user.
+if pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -tAc \"SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='users'\"" 2>/dev/null | grep -q '[0-9]'; then
+  USER_COUNT=$(pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -tAc \"SELECT count(*) FROM users\"" 2>/dev/null || echo "?")
+  echo "[entrypoint] Database state: users table has $USER_COUNT rows"
+else
+  echo "[entrypoint] Database state: users table does not exist yet (fresh install or migrations not run)"
 fi
 
 # Create the app database + role if missing (idempotent).
@@ -249,9 +291,14 @@ fi
 cleanup() {
   echo "[entrypoint] Stopping bundled Postgres"
   # Unmount S3 first (if mounted) so pending writes flush before postgres stops.
-  if mountpoint -q "$S3_MOUNT_DIR" 2>/dev/null; then
+  if [ -n "${S3_MOUNT_DIR:-}" ] && mountpoint -q "$S3_MOUNT_DIR" 2>/dev/null; then
     fusermount -u "$S3_MOUNT_DIR" 2>/dev/null || umount "$S3_MOUNT_DIR" 2>/dev/null || true
   fi
+  # Force a final checkpoint so commits are flushed to data files before stop.
+  # This is critical: HF Spaces hard-kills containers, and if the WAL hasn't
+  # been checkpointed, the next boot's crash recovery (or worse, pg_resetwal)
+  # can lose those commits — causing the "restart resets to setup" symptom.
+  pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CHECKPOINT\"" 2>/dev/null || true
   pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" stop -m fast -w" || true
 }
 trap cleanup EXIT INT TERM
