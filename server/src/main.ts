@@ -48,14 +48,23 @@ class Workers {
     const { database } = new ConfigRepository().getEnv();
     const { log: _, ...kyselyConfig } = getKyselyConfig(database.config);
     const kysely = new Kysely<DB>(kyselyConfig);
-    const systemMetadataRepository = new SystemMetadataRepository(kysely);
 
     try {
+      // On a fresh database, migrations haven't run yet so system_metadata
+      // doesn't exist. Querying it directly causes porsager/postgres to emit an
+      // uncaught rejection on its connection-level error channel (independent of
+      // the query promise that try/catch catches), crashing the parent process.
+      // Check information_schema.tables — a built-in view that always exists —
+      // first so we never send a query against a non-existent relation.
+      const { rows } = await sql`SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'system_metadata')`.execute(kysely);
+      if (!rows[0]?.exists) {
+        return false;
+      }
+
+      const systemMetadataRepository = new SystemMetadataRepository(kysely);
       const value = await systemMetadataRepository.get(SystemMetadataKey.MaintenanceMode);
       return value?.isMaintenanceMode || false;
     } catch {
-      // Fresh database — system_metadata table doesn't exist yet because
-      // migrations haven't run. Not in maintenance mode.
       return false;
     } finally {
       await kysely.destroy();
@@ -206,5 +215,18 @@ function main() {
 
   void new Workers().bootstrap();
 }
+
+// The supervisor (parent process) has no process-level error handlers, unlike
+// the worker files (api.ts, microservices.ts) which register their own.
+// porsager/postgres emits query errors on TWO channels: the query promise
+// (caught by try/catch) AND a connection-level error promise that is only
+// interceptable via the `onerror` option — which createPostgres never sets.
+// That second rejection is unattached and becomes an unhandledRejection. Without
+// this handler, Node's default behaviour crashes the supervisor. Log it so we
+// can diagnose real issues, but don't exit — the query error itself was already
+// handled by the try/catch, and the supervisor's job is to keep workers alive.
+process.on('unhandledRejection', (reason) => {
+  console.error('supervisor unhandledRejection (ignored):', reason);
+});
 
 void main();
