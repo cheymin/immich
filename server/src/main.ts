@@ -56,7 +56,7 @@ class Workers {
       // the query promise that try/catch catches), crashing the parent process.
       // Check information_schema.tables — a built-in view that always exists —
       // first so we never send a query against a non-existent relation.
-      const { rows } = await sql`SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'system_metadata')`.execute(kysely);
+      const { rows } = await sql<{ exists: boolean }>`SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'system_metadata')`.execute(kysely);
       if (!rows[0]?.exists) {
         return false;
       }
