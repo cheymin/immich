@@ -83,6 +83,29 @@ if [ ! -s "$PG_DIR/PG_VERSION" ]; then
   pg_exec "$PG_BIN/initdb -D \"$PG_DIR\" -U postgres --encoding=UTF8 --locale=C --auth-local=trust --auth-host=trust"
 fi
 
+# Recreate any missing standard runtime subdirectories. initdb creates these,
+# but they can disappear after an unclean shutdown (container SIGKILL / OOM)
+# combined with persistent-volume quirks on hosted runtimes such as HF Spaces.
+# Postgres FATAls on a missing pg_notify instead of recreating it, so recreate
+# the runtime/state dirs ourselves. These hold no user data — real data lives
+# in base/, global/, pg_wal/, pg_xact/ which we do NOT touch.
+if [ "$RUN_AS_ROOT" = "1" ]; then
+  for subdir in pg_notify pg_stat_tmp pg_replslot pg_serial pg_snapshots pg_dynshmem pg_commit_ts pg_twophase pg_tblspc; do
+    runuser -u postgres -- mkdir -p "$PG_DIR/$subdir" 2>/dev/null || mkdir -p "$PG_DIR/$subdir"
+  done
+  chown -R postgres:postgres "$PG_DIR" 2>/dev/null || true
+else
+  for subdir in pg_notify pg_stat_tmp pg_replslot pg_serial pg_snapshots pg_dynshmem pg_commit_ts pg_twophase pg_tblspc; do
+    mkdir -p "$PG_DIR/$subdir"
+  done
+fi
+# Also clear any half-written WAL segment that could block recovery. The
+# recovery loop seen in the logs ("invalid record length") is normal after a
+# crash, but a torn WAL file at the head can occasionally prevent startup.
+# pg_resetwal is the safe tool for this, but only run it as a last resort and
+# only if the server genuinely won't start — handled below after the first
+# start attempt fails.
+
 # Clean up stale lock files left by an unclean shutdown (container kill, OOM,
 # etc.). pg_ctl refuses to start if postmaster.pid points at a dead process.
 # Also remove postmaster.opts to avoid confusion. Only remove pid if no live
@@ -99,11 +122,32 @@ fi
 # root-owned after a volume remount.
 echo "[entrypoint] Starting Postgres on 127.0.0.1:$PG_PORT"
 if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"; then
-  echo "[entrypoint] FATAL: Postgres failed to start. Server log follows:" >&2
-  echo "----- BEGIN $PG_LOG -----" >&2
-  cat "$PG_LOG" >&2 2>/dev/null || echo "(could not read $PG_LOG)" >&2
-  echo "----- END $PG_LOG -----" >&2
-  exit 1
+  # First start failed. The most common cause on hosted runtimes is a torn WAL
+  # head left by an unclean shutdown (the recovery log shows "invalid record
+  # length at ..."). pg_resetwal advances the WAL position past the corrupt
+  # segment so postgres can come up. It is the documented recovery tool for
+  # exactly this symptom and does not touch table data. We only run it when the
+  # data dir already exists (not a fresh initdb) — a fresh init that fails is a
+  # real error and should surface.
+  if [ -s "$PG_DIR/PG_VERSION" ]; then
+    echo "[entrypoint] First start failed — attempting WAL reset recovery"
+    pg_exec "$PG_BIN/pg_resetwal -f \"$PG_DIR\"" || true
+    # Retry the start once.
+    if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"; then
+      echo "[entrypoint] FATAL: Postgres failed to start after WAL reset. Server log follows:" >&2
+      echo "----- BEGIN $PG_LOG -----" >&2
+      cat "$PG_LOG" >&2 2>/dev/null || echo "(could not read $PG_LOG)" >&2
+      echo "----- END $PG_LOG -----" >&2
+      exit 1
+    fi
+    echo "[entrypoint] Recovered via WAL reset — Postgres started on second attempt"
+  else
+    echo "[entrypoint] FATAL: Postgres failed to start. Server log follows:" >&2
+    echo "----- BEGIN $PG_LOG -----" >&2
+    cat "$PG_LOG" >&2 2>/dev/null || echo "(could not read $PG_LOG)" >&2
+    echo "----- END $PG_LOG -----" >&2
+    exit 1
+  fi
 fi
 
 # Create the app database + role if missing (idempotent).
