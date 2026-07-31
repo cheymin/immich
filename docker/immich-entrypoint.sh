@@ -73,6 +73,9 @@ else
   # may have left it owned by postgres, which we can't write to).
   chown -R "$(id -u):$(id -g)" "$PG_DIR" 2>/dev/null || true
 fi
+# Postgres refuses to start if the data directory has group/other write bits
+# (mkdir defaults to 0755, HF volume mounts can be 0777). Force 0700.
+chmod 0700 "$PG_DIR"
 
 # Initialise the data directory on first boot.
 if [ ! -s "$PG_DIR/PG_VERSION" ]; then
