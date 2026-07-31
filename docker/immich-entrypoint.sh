@@ -108,37 +108,58 @@ else
 fi
 
 # Recreate any missing standard runtime subdirectories. initdb creates these,
-# but they can disappear after an unclean shutdown (container SIGKILL / OOM)
-# combined with persistent-volume quirks on hosted runtimes such as HF Spaces.
-# Postgres FATAls on a missing pg_notify instead of recreating it, so recreate
-# the runtime/state dirs ourselves. These hold no user data — real data lives
-# in base/, global/, pg_wal/, pg_xact/ which we do NOT touch.
-if [ "$RUN_AS_ROOT" = "1" ]; then
-  for subdir in pg_notify pg_stat_tmp pg_replslot pg_serial pg_snapshots pg_dynshmem pg_commit_ts pg_twophase pg_tblspc; do
-    runuser -u postgres -- mkdir -p "$PG_DIR/$subdir" 2>/dev/null || mkdir -p "$PG_DIR/$subdir"
-  done
-  chown -R postgres:postgres "$PG_DIR" 2>/dev/null || true
-else
-  for subdir in pg_notify pg_stat_tmp pg_replslot pg_serial pg_snapshots pg_dynshmem pg_commit_ts pg_twophase pg_tblspc; do
+# but HF Spaces' persistent-volume remount on restart can silently empty them
+# (the directory entry survives, but its contents are gone). Postgres FATALs
+# on a missing pg_notify / pg_logical/snapshots instead of recreating them,
+# so recreate all runtime/state dirs ourselves. These hold no user data — real
+# data lives in base/, global/, pg_xact/ which we do NOT touch.
+recreate_subdirs() {
+  for subdir in \
+    pg_notify pg_stat_tmp pg_replslot pg_serial pg_snapshots \
+    pg_dynshmem pg_commit_ts pg_twophase pg_tblspc \
+    pg_logical pg_logical/snapshots pg_logical/mappings \
+    pg_wal pg_wal/archive_status pg_wal/pg_replslot \
+    pg_subtrans pg_multixact/members pg_multixact/offsets pg_multixact/page
+  do
     mkdir -p "$PG_DIR/$subdir"
   done
+}
+if [ "$RUN_AS_ROOT" = "1" ]; then
+  runuser -u postgres -- bash -c "$(declare -f recreate_subdirs); recreate_subdirs" 2>/dev/null || recreate_subdirs
+  chown -R postgres:postgres "$PG_DIR" 2>/dev/null || true
+else
+  recreate_subdirs
 fi
-# Also clear any half-written WAL segment that could block recovery. The
-# recovery loop seen in the logs ("invalid record length") is normal after a
-# crash, but a torn WAL file at the head can occasionally prevent startup.
-# pg_resetwal is the safe tool for this, but only run it as a last resort and
-# only if the server genuinely won't start — handled below after the first
-# start attempt fails.
+
+# Detect wiped WAL. HF Spaces can empty pg_wal/ on restart, leaving zero WAL
+# segment files. Postgres cannot start crash recovery without WAL — it loops
+# on "invalid record length" / "invalid magic number" and the checkpoint at
+# end-of-recovery fails. If pg_wal has no segment files, run pg_resetwal NOW
+# (before any start attempt) so the first boot has a valid WAL to recover from.
+# pg_resetwal creates a fresh WAL segment and updates pg_control's checkpoint
+# info to point at it. This is safe: it does not touch table data in base/.
+WAL_SEGMENTS=$(find "$PG_DIR/pg_wal" -maxdepth 1 -type f -name '0000000*' 2>/dev/null | wc -l)
+if [ -s "$PG_DIR/PG_VERSION" ] && [ "$WAL_SEGMENTS" -eq 0 ]; then
+  echo "[entrypoint] pg_wal has no WAL segment files — running pg_resetwal to create a fresh WAL"
+  # pg_resetwal refuses to run if postmaster.pid exists, even stale. Remove it.
+  rm -f "$PG_DIR/postmaster.pid"
+  pg_exec "$PG_BIN/pg_resetwal -f \"$PG_DIR\"" || echo "[entrypoint] WARNING: pg_resetwal failed"
+fi
 
 # Clean up stale lock files left by an unclean shutdown (container kill, OOM,
 # etc.). pg_ctl refuses to start if postmaster.pid points at a dead process.
-# Also remove postmaster.opts to avoid confusion. Only remove pid if no live
-# postgres is actually running on it.
+# Always remove it here — we've already ensured no live postgres is running
+# (the WAL-reset path above would have killed it). Keeping a stale pid just
+# causes the "lock file exists" errors seen in the logs.
 if [ -f "$PG_DIR/postmaster.pid" ]; then
-  if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" status" >/dev/null 2>&1; then
-    echo "[entrypoint] Removing stale postmaster.pid"
-    rm -f "$PG_DIR/postmaster.pid"
+  OLD_PID=$(head -1 "$PG_DIR/postmaster.pid" 2>/dev/null || true)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "[entrypoint] Killing stale postgres PID $OLD_PID"
+    kill -9 "$OLD_PID" 2>/dev/null || true
+    sleep 2
   fi
+  echo "[entrypoint] Removing stale postmaster.pid"
+  rm -f "$PG_DIR/postmaster.pid"
 fi
 
 # Start Postgres: listen only on localhost (internal use), socket + TCP.
@@ -153,19 +174,14 @@ fi
 # failure then triggers the WAL-reset path, which conflicts with the still-
 # running postgres (postmaster.pid lock) and wedges startup for real.
 echo "[entrypoint] Starting Postgres on 127.0.0.1:$PG_PORT"
-# First attempt: long timeout (crash recovery fsync is slow on HF volumes).
-# Pass checkpoint tuning via -o so it applies even on existing clusters that
-# were initialised before the postgresql.conf tuning was added.
+# Long timeout (-t 180): crash recovery fsync is slow on HF persistent volumes.
+# Checkpoint tuning via -o so it applies even on pre-existing clusters.
 PG_OPTS="-c listen_addresses=127.0.0.1 -c port=$PG_PORT -c checkpoint_timeout=30s -c max_wal_size=256MB"
 if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"$PG_OPTS\" start -w -t 180"; then
-  # First start failed. Before attempting WAL reset, make absolutely sure no
-  # postgres process is still running against this data dir — pg_ctl's -w may
-  # have timed out while postgres was still doing crash-recovery fsync, leaving
-  # a live process holding postmaster.pid. pg_resetwal refuses to run while
-  # that pid file exists, and a second pg_ctl start would collide with it.
-  echo "[entrypoint] First start failed — stopping any lingering postgres process"
+  # Start failed. pg_ctl -w may have timed out while postgres was still doing
+  # crash-recovery fsync, leaving a live process. Kill it before retrying.
+  echo "[entrypoint] First start failed — cleaning up and retrying"
   pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" stop -m immediate -w -t 30" 2>/dev/null || true
-  # Force-kill anything still holding the data dir, then remove the pid file.
   if [ -f "$PG_DIR/postmaster.pid" ]; then
     OLD_PID=$(head -1 "$PG_DIR/postmaster.pid" 2>/dev/null || true)
     if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
@@ -176,34 +192,16 @@ if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"$PG_OPTS\" start
     rm -f "$PG_DIR/postmaster.pid"
   fi
 
-  # Retry WITHOUT WAL reset first. pg_ctl -w may have simply timed out during
-  # crash-recovery fsync while the server was otherwise healthy. Give it a
-  # second chance with the same long timeout before resorting to the more
-  # destructive pg_resetwal (which can lose un-checkpointed commits).
-  echo "[entrypoint] Retrying start (no WAL reset yet)"
-  if pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"$PG_OPTS\" start -w -t 180"; then
-    echo "[entrypoint] Postgres started on second attempt (no WAL reset needed)"
-  elif [ -s "$PG_DIR/PG_VERSION" ]; then
-    # Last resort: WAL reset. This advances the WAL position past a torn
-    # segment. WARNING: un-checkpointed committed transactions will be lost.
-    # With checkpoint_timeout=30s the window is small, but non-zero.
-    echo "[entrypoint] Second start failed — attempting WAL reset as last resort"
-    pg_exec "$PG_BIN/pg_resetwal -f \"$PG_DIR\"" || true
-    if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"$PG_OPTS\" start -w -t 180"; then
-      echo "[entrypoint] FATAL: Postgres failed to start after WAL reset. Server log follows:" >&2
-      echo "----- BEGIN $PG_LOG -----" >&2
-      cat "$PG_LOG" >&2 2>/dev/null || echo "(could not read $PG_LOG)" >&2
-      echo "----- END $PG_LOG -----" >&2
-      exit 1
-    fi
-    echo "[entrypoint] Recovered via WAL reset — Postgres started on third attempt (DATA LOSS POSSIBLE)"
-  else
+  # Retry. WAL was already reset above if it was empty, so this attempt covers
+  # the false-timeout case (postgres was healthy but slow to fsync).
+  if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"$PG_OPTS\" start -w -t 180"; then
     echo "[entrypoint] FATAL: Postgres failed to start. Server log follows:" >&2
     echo "----- BEGIN $PG_LOG -----" >&2
     cat "$PG_LOG" >&2 2>/dev/null || echo "(could not read $PG_LOG)" >&2
     echo "----- END $PG_LOG -----" >&2
     exit 1
   fi
+  echo "[entrypoint] Postgres started on second attempt"
 fi
 
 # Diagnostic: show whether the app database has user data. If tables exist but
