@@ -91,6 +91,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     file \
     perl \
+    s3fs \
     postgresql-15 \
     postgresql-contrib-15 \
     postgresql-client-15 \

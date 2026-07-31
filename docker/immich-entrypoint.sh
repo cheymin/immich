@@ -201,9 +201,57 @@ export DB_SSL_MODE="disable"
 
 echo "[entrypoint] Bundled Postgres ready: $PG_USER@127.0.0.1:$PG_PORT/$PG_DB"
 
+# ---- Optional S3 mount via s3fs ------------------------------------------
+# If S3_* env vars are set, mount the bucket at /data/s3 so Immich can store
+# media on S3 while keeping its DB on the local /data volume. Immich itself
+# has no native S3 support — this mount makes S3 behave as a local filesystem.
+#
+# Required env:
+#   S3_BUCKET          - bucket name
+#   S3_ACCESS_KEY      - access key id
+#   S3_SECRET_KEY      - secret access key
+# Optional:
+#   S3_ENDPOINT        - e.g. https://s3.us-east-005.backblazeb2.com (omit for AWS)
+#   S3_REGION          - region (default: auto)
+#   S3_MOUNT           - mount path (default: /data/s3)
+S3_MOUNT_DIR="${S3_MOUNT:-/data/s3}"
+if [ -n "${S3_BUCKET:-}" ] && [ -n "${S3_ACCESS_KEY:-}" ] && [ -n "${S3_SECRET_KEY:-}" ]; then
+  echo "[entrypoint] S3 bucket configured — mounting ${S3_BUCKET} at ${S3_MOUNT_DIR}"
+  mkdir -p "$S3_MOUNT_DIR"
+  # Write credentials in the format s3fs expects.
+  echo "${S3_ACCESS_KEY}:${S3_SECRET_KEY}" > /tmp/.s3fs-creds
+  chmod 600 /tmp/.s3fs-creds
+
+  # s3fs runs as a background daemon by default (no -f). Build the option set.
+  S3FS_OPTS="passwd_file=/tmp/.s3fs-creds,url=${S3_ENDPOINT:-https://s3.amazonaws.com}"
+  S3FS_OPTS="$S3FS_OPTS,endpoint=${S3_REGION:-us-east-1}"
+  # allow_other lets the node process (non-root on HF Spaces) read the mount.
+  S3FS_OPTS="$S3FS_OPTS,allow_other"
+  # umask makes files group-readable so non-root workers can access them.
+  S3FS_OPTS="$S3FS_OPTS,umask=0002"
+  # Connect immediately and fail fast if credentials/endpoint are wrong.
+  S3FS_OPTS="$S3FS_OPTS,connect_timeout=10,readwrite_timeout=30"
+
+  if ! s3fs "${S3_BUCKET}:" "$S3_MOUNT_DIR" -o "$S3FS_OPTS" 2>/tmp/s3fs.err; then
+    echo "[entrypoint] FATAL: s3fs mount failed:" >&2
+    cat /tmp/s3fs.err >&2 2>/dev/null || true
+    # Don't exit — let Immich fall back to local storage so the app still starts.
+    echo "[entrypoint] Continuing with local storage only — S3 media unavailable" >&2
+  else
+    echo "[entrypoint] S3 mounted at ${S3_MOUNT_DIR}"
+  fi
+  rm -f /tmp/.s3fs-creds
+else
+  echo "[entrypoint] No S3 configured — using local storage on /data"
+fi
+
 # Run the app; on exit, stop Postgres cleanly.
 cleanup() {
   echo "[entrypoint] Stopping bundled Postgres"
+  # Unmount S3 first (if mounted) so pending writes flush before postgres stops.
+  if mountpoint -q "$S3_MOUNT_DIR" 2>/dev/null; then
+    fusermount -u "$S3_MOUNT_DIR" 2>/dev/null || umount "$S3_MOUNT_DIR" 2>/dev/null || true
+  fi
   pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" stop -m fast -w" || true
 }
 trap cleanup EXIT INT TERM

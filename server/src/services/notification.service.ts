@@ -80,12 +80,14 @@ export class NotificationService extends BaseService {
 
   @OnEvent({ name: 'JobError' })
   async onJobError({ job, error }: ArgOf<'JobError'>) {
+    // Log unconditionally — the admin check below silenced job errors before any
+    // admin existed (fresh install), making thumbnail/metadata failures invisible.
+    this.logger.error(`Unable to run job handler (${job.name}): ${error}`, error?.stack, JSON.stringify(job.data));
+
     const admin = await this.userRepository.getAdmin();
     if (!admin) {
       return;
     }
-
-    this.logger.error(`Unable to run job handler (${job.name}): ${error}`, error?.stack, JSON.stringify(job.data));
 
     switch (job.name) {
       case JobName.DatabaseBackup: {
