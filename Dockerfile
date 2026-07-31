@@ -1,9 +1,8 @@
 # Lightweight single-container Immich build.
-# - External PostgreSQL (configured via first-run setup wizard at /api/setup/db,
-#   or via DB_URL / DB_HOSTNAME env vars; persisted to /data/db-config.json)
+# - Bundled PostgreSQL (data persisted on /data volume, zero external config)
 # - In-process job queue (no Redis)
 # - Local Tesseract OCR (no machine-learning container)
-# - Local or S3 image storage
+# - Local filesystem image storage on /data (mount s3fs/goofys for S3)
 # - Face recognition / CLIP search / video transcoding removed
 # Listens on port 7860.
 
@@ -91,6 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tini \
     file \
+    perl \
     postgresql-15 \
     postgresql-contrib-15 \
     postgresql-client-15 \
@@ -105,7 +105,8 @@ ENV NODE_ENV=production \
   IMMICH_HOST=0.0.0.0 \
   TESSERACT_PATH=tesseract \
   TESSERACT_LANG=eng \
-  IMMICH_IGNORE_MOUNT_CHECK_ERRORS=true
+  IMMICH_IGNORE_MOUNT_CHECK_ERRORS=true \
+  IMMICH_MACHINE_LEARNING_ENABLED=false
 
 # Server (built artifacts + pruned prod node_modules)
 COPY --from=builder /output/server-pruned ./server
