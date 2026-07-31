@@ -107,7 +107,8 @@ ENV NODE_ENV=production \
   TESSERACT_PATH=tesseract \
   TESSERACT_LANG=eng \
   IMMICH_IGNORE_MOUNT_CHECK_ERRORS=true \
-  IMMICH_MACHINE_LEARNING_ENABLED=false
+  IMMICH_MACHINE_LEARNING_ENABLED=false \
+  IMMICH_MEDIA_LOCATION=/data
 
 # Server (built artifacts + pruned prod node_modules)
 COPY --from=builder /output/server-pruned ./server
