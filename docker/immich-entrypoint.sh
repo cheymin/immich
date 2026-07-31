@@ -13,6 +13,7 @@ PG_PORT="${IMMICH_DB_PORT:-5432}"
 PG_DB="${IMMICH_DB_NAME:-immich}"
 PG_USER="${IMMICH_DB_USER:-immich}"
 PG_PASSWORD="${IMMICH_DB_PASSWORD:-immich}"
+PG_LOG="$PG_DIR/server.log"
 
 # If the operator supplied an external DB connection, don't start a local one.
 if [ -n "${DB_URL:-}" ] || [ -n "${DB_HOSTNAME:-}" ]; then
@@ -23,8 +24,8 @@ fi
 echo "[entrypoint] No external DB configured — starting bundled Postgres."
 
 # Debian's postgresql package installs binaries under
-# /usr/lib/postgresql/<ver>/bin (NOT in PATH), and `su postgres -c` inherits a
-# minimal PATH without that dir. Locate it once and use absolute paths.
+# /usr/lib/postgresql/<ver>/bin (NOT in PATH). Locate it once and use absolute
+# paths — `su`/`runuser` inherit a minimal PATH without that dir.
 PG_BIN="$(dirname "$(find /usr/lib/postgresql -name initdb -type f 2>/dev/null | head -1)")"
 if [ -z "$PG_BIN" ] || [ ! -x "$PG_BIN/initdb" ]; then
   echo "[entrypoint] FATAL: initdb not found under /usr/lib/postgresql" >&2
@@ -32,25 +33,27 @@ if [ -z "$PG_BIN" ] || [ ! -x "$PG_BIN/initdb" ]; then
 fi
 echo "[entrypoint] Using Postgres binaries at $PG_BIN"
 
-# Determine how to run postgres commands. As root we switch to the postgres
-# user (Debian package creates it). As non-root (some runtimes like HF Spaces
-# force a non-root container user) we run postgres directly as the current
-# user — initdb supports running as a non-root user, we just have to make sure
-# the data dir is owned by that user.
+# Determine how to run postgres commands.
+# - As root: switch to the postgres user (Debian package creates it).
+# - As non-root (some runtimes like HF Spaces force this): run directly as the
+#   current user. initdb supports non-root operation as long as the current
+#   user owns the data dir.
 if [ "$(id -u)" = "0" ]; then
   RUN_AS_ROOT=1
-  PG_USER_SWITCH="su postgres -c"
+  echo "[entrypoint] Running as root — postgres commands will use 'runuser postgres'."
 else
   RUN_AS_ROOT=0
-  PG_USER_SWITCH=""
+  echo "[entrypoint] Running as non-root user '$(id -un)' (uid $(id -u)) — postgres will run as this user."
 fi
 
 # Helper: run a command as the postgres user (root case) or directly (non-root).
+# Uses runuser instead of su: it doesn't clobber PATH/env the way su does and
+# is the recommended tool for this on modern Debian.
 pg_exec() {
   if [ "$RUN_AS_ROOT" = "1" ]; then
-    su postgres -c "$*"
+    runuser -u postgres -- bash -c "$*"
   else
-    eval "$*"
+    bash -c "$*"
   fi
 }
 
@@ -58,27 +61,29 @@ pg_exec() {
 mkdir -p "$PG_RUN"
 chmod 0777 "$PG_RUN"
 
-# Initialise the data directory on first boot.
-if [ ! -s "$PG_DIR/PG_VERSION" ]; then
-  echo "[entrypoint] Initialising database cluster at $PG_DIR"
-  mkdir -p "$(dirname "$PG_DIR")"
-  if [ "$RUN_AS_ROOT" = "1" ]; then
-    chown -R postgres:postgres "$(dirname "$PG_DIR")"
-  fi
-  pg_exec "$PG_BIN/initdb -D \"$PG_DIR\" -U postgres --encoding=UTF8 --locale=C --auth-local=trust --auth-host=trust"
-fi
-
-# Always make sure the data dir is owned by the postgres user (root case) or
-# current user (non-root case). /data itself may be root-owned after a volume
-# remount (HF Spaces resets ownership on restart), so chown the top-level dir
-# too — otherwise postgres can't write a log file at /data/*.log.
+# Make sure /data and the postgres dir exist and are owned correctly.
+# HF Spaces remounts /data on restart and may reset ownership, so do this
+# unconditionally (not just on first initdb).
+mkdir -p "$PG_DIR"
 if [ "$RUN_AS_ROOT" = "1" ]; then
   chown postgres:postgres /data 2>/dev/null || true
   chown -R postgres:postgres "$PG_DIR"
+else
+  # Non-root: ensure current user owns the data dir (previous root-mode boot
+  # may have left it owned by postgres, which we can't write to).
+  chown -R "$(id -u):$(id -g)" "$PG_DIR" 2>/dev/null || true
 fi
 
-# Clean up stale postmaster.pid left by an unclean shutdown (container kill,
-# OOM, etc.) — pg_ctl prints a scary warning and may refuse to start otherwise.
+# Initialise the data directory on first boot.
+if [ ! -s "$PG_DIR/PG_VERSION" ]; then
+  echo "[entrypoint] Initialising database cluster at $PG_DIR"
+  pg_exec "$PG_BIN/initdb -D \"$PG_DIR\" -U postgres --encoding=UTF8 --locale=C --auth-local=trust --auth-host=trust"
+fi
+
+# Clean up stale lock files left by an unclean shutdown (container kill, OOM,
+# etc.). pg_ctl refuses to start if postmaster.pid points at a dead process.
+# Also remove postmaster.opts to avoid confusion. Only remove pid if no live
+# postgres is actually running on it.
 if [ -f "$PG_DIR/postmaster.pid" ]; then
   if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" status" >/dev/null 2>&1; then
     echo "[entrypoint] Removing stale postmaster.pid"
@@ -87,10 +92,16 @@ if [ -f "$PG_DIR/postmaster.pid" ]; then
 fi
 
 # Start Postgres: listen only on localhost (internal use), socket + TCP.
-echo "[entrypoint] Starting Postgres on 127.0.0.1:$PG_PORT"
 # Log lives inside PG_DIR (owned by the postgres user) — /data itself may be
-# root-owned after a volume remount, so writing /data/postgres.log fails.
-pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_DIR/server.log\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"
+# root-owned after a volume remount.
+echo "[entrypoint] Starting Postgres on 127.0.0.1:$PG_PORT"
+if ! pg_exec "$PG_BIN/pg_ctl -D \"$PG_DIR\" -l \"$PG_LOG\" -o \"-c listen_addresses=127.0.0.1 -c port=$PG_PORT\" start -w"; then
+  echo "[entrypoint] FATAL: Postgres failed to start. Server log follows:" >&2
+  echo "----- BEGIN $PG_LOG -----" >&2
+  cat "$PG_LOG" >&2 2>/dev/null || echo "(could not read $PG_LOG)" >&2
+  echo "----- END $PG_LOG -----" >&2
+  exit 1
+fi
 
 # Create the app database + role if missing (idempotent).
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -tc \"SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'\" | grep -q 1 || $PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -c \"CREATE USER $PG_USER WITH PASSWORD '$PG_PASSWORD';\""
@@ -100,7 +111,6 @@ pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -c \"ALTER USER $PG_U
 # Pre-create the pgvector extension in the app database as a superuser.
 # Immich's onBootstrap requires a vector extension before it runs migrations,
 # and the app role isn't a superuser so it can't CREATE EXTENSION itself.
-# Doing it here (idempotently) lets migrations proceed.
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CREATE EXTENSION IF NOT EXISTS vector CASCADE;\"" || echo "[entrypoint] WARNING: could not create vector extension"
 
 # Point Immich at the bundled instance. sslmode=disable because it's loopback.
