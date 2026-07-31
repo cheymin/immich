@@ -178,9 +178,17 @@ pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -tc \"SELECT 1 FROM p
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -tc \"SELECT 1 FROM pg_database WHERE datname='$PG_DB'\" | grep -q 1 || $PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -c \"CREATE DATABASE $PG_DB OWNER $PG_USER;\""
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -c \"ALTER USER $PG_USER WITH PASSWORD '$PG_PASSWORD';\""
 
-# Pre-create the pgvector extension in the app database as a superuser.
-# Immich's onBootstrap requires a vector extension before it runs migrations,
-# and the app role isn't a superuser so it can't CREATE EXTENSION itself.
+# Pre-create ALL extensions Immich needs in the app database as a superuser.
+# Immich's InitialMigration (1744910873969) runs CREATE EXTENSION for these,
+# but the app role isn't a superuser so it can't create them itself (Postgres
+# requires superuser for most extensions). Pre-creating them as the postgres
+# superuser means the migration's CREATE EXTENSION IF NOT EXISTS becomes a
+# no-op. Full list from server/src/schema/migrations/1744910873969-InitialMigration.ts
+pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CREATE EXTENSION IF NOT EXISTS \\\"uuid-ossp\\\";\"" || echo "[entrypoint] WARNING: could not create uuid-ossp extension"
+pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CREATE EXTENSION IF NOT EXISTS unaccent;\"" || echo "[entrypoint] WARNING: could not create unaccent extension"
+pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CREATE EXTENSION IF NOT EXISTS cube;\"" || echo "[entrypoint] WARNING: could not create cube extension"
+pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CREATE EXTENSION IF NOT EXISTS earthdistance;\"" || echo "[entrypoint] WARNING: could not create earthdistance extension"
+pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CREATE EXTENSION IF NOT EXISTS pg_trgm;\"" || echo "[entrypoint] WARNING: could not create pg_trgm extension"
 pg_exec "$PG_BIN/psql -h 127.0.0.1 -p $PG_PORT -U postgres -d \"$PG_DB\" -c \"CREATE EXTENSION IF NOT EXISTS vector CASCADE;\"" || echo "[entrypoint] WARNING: could not create vector extension"
 
 # Point Immich at the bundled instance. sslmode=disable because it's loopback.
